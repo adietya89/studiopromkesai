@@ -1,8 +1,7 @@
-from pathlib import Path
-import zipfile, py_compile, os
-
-base = Path("/mnt/data/studiopromkesai_baru")
-base.mkdir(parents=True, exist_ok=True)
+import os
+import io
+import streamlit as st
+from PIL import Image
 
 app_code = r'''import os
 import io
