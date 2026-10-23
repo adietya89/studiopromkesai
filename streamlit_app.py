@@ -1,506 +1,579 @@
 
 import streamlit as st
+import os
+import io
+import time
+from datetime import datetime
+
+from huggingface_hub import InferenceClient
 
 st.set_page_config(
-    page_title="Studio AI | Creative Workspace",
-    page_icon="🎨",
+    page_title="Studio AI",
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# =========================
-# SESSION STATE
-# =========================
-if "active_menu" not in st.session_state:
-    st.session_state.active_menu = "Dashboard"
+# =====================================================
+# CONFIGURATION
+# =====================================================
+CHAT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+IMAGE_MODEL = "black-forest-labs/FLUX.1-schnell"
+VIDEO_MODEL = "Wan-AI/Wan2.2-TI2V-5B"
 
-if "total_foto" not in st.session_state:
-    st.session_state.total_foto = 0
+MAX_CHAT_MESSAGES = 30
+MAX_IMAGES_PER_SESSION = 3
+MAX_VIDEOS_PER_SESSION = 1
 
-if "total_video" not in st.session_state:
-    st.session_state.total_video = 0
+def get_token():
+    token = os.environ.get("HF_TOKEN", "")
+    try:
+        token = st.secrets.get("HF_TOKEN", token)
+    except Exception:
+        pass
+    return str(token).strip()
 
-# =========================
-# CSS DASHBOARD
-# =========================
+def get_client():
+    token = get_token()
+    if not token:
+        raise RuntimeError(
+            "API belum dikonfigurasi oleh pemilik aplikasi."
+        )
+    return InferenceClient(api_key=token, timeout=180)
+
+def init_state():
+    defaults = {
+        "messages": [],
+        "conversations": [],
+        "gallery": [],
+        "image_count": 0,
+        "video_count": 0,
+        "chat_count": 0,
+        "current_chat": "Percakapan baru",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+init_state()
+
+# =====================================================
+# DESIGN
+# =====================================================
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 .stApp {
-    background: #080b16;
-    color: #f8fafc;
-    font-family: 'Inter', sans-serif;
+    background: #212121;
+    color: #ececec;
+    font-family: Inter, sans-serif;
 }
-
 [data-testid="stHeader"] {
-    background: rgba(8,11,22,0.9);
+    background: rgba(33,33,33,.95);
 }
-
 .block-container {
-    max-width: 1450px;
-    padding-top: 1.8rem;
-    padding-bottom: 3rem;
+    max-width: 1050px;
+    padding-top: 1.4rem;
+    padding-bottom: 5rem;
 }
-
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg,#10152b 0%,#0b1020 100%);
-    border-right: 1px solid rgba(255,255,255,.08);
+    background: #171717;
+    border-right: 1px solid #303030;
 }
-
 [data-testid="stSidebar"] * {
-    color: #e2e8f0;
+    color: #ececec;
 }
-
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1 {
-    font-size: 1.65rem;
-    font-weight: 900;
-}
-
-div[data-testid="stMetric"] {
-    background: linear-gradient(145deg,#171e35,#101527);
-    border: 1px solid rgba(255,255,255,.09);
-    border-radius: 18px;
-    padding: 20px;
-}
-
-div[data-testid="stMetricLabel"] {
-    color: #a5b4fc;
-}
-
-div[data-testid="stMetricValue"] {
-    color: #ffffff;
-    font-weight: 800;
-}
-
 .stButton > button {
-    width: 100%;
-    min-height: 45px;
-    border: 1px solid rgba(255,255,255,.12);
     border-radius: 12px;
-    color: white;
-    font-weight: 700;
-    background: linear-gradient(100deg,#7048ff,#4169f5);
-    transition: .2s;
+    min-height: 42px;
+    border: 1px solid #414141;
+    background: #2c2c2c;
+    color: #f5f5f5;
+    font-weight: 600;
 }
-
 .stButton > button:hover {
-    border-color: #a5b4fc;
+    border-color: #8b8b8b;
     color: white;
-    filter: brightness(1.16);
+    background: #383838;
 }
-
+div[data-testid="stChatMessage"] {
+    border-radius: 15px;
+    border: 0;
+    padding: 14px 17px;
+}
+div[data-testid="stChatInput"] {
+    border-color: #555;
+}
+div[data-testid="stChatInput"] textarea {
+    color: #fff;
+}
 .hero {
-    padding: 35px;
-    border-radius: 25px;
-    background:
-        radial-gradient(ellipse at 90% 10%,rgba(0,225,255,.22),transparent 32%),
-        radial-gradient(ellipse at 5% 100%,rgba(139,92,246,.4),transparent 48%),
-        linear-gradient(120deg,#171735,#17213d 65%,#172b40);
-    border: 1px solid rgba(255,255,255,.13);
-    margin-bottom: 27px;
-    position: relative;
-    overflow: hidden;
+    text-align: center;
+    padding: 55px 10px 25px;
 }
-
-.hero-label {
-    display: inline-block;
-    padding: 7px 12px;
-    border-radius: 30px;
-    background: rgba(139,92,246,.2);
-    border: 1px solid rgba(167,139,250,.35);
-    color: #c4b5fd;
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 1px;
-}
-
 .hero h1 {
-    font-size: clamp(31px,4vw,52px);
-    line-height: 1.13;
-    font-weight: 900;
-    letter-spacing: -1.8px;
-    margin: 20px 0 14px;
+    font-size: clamp(30px,4vw,43px);
+    font-weight: 800;
+    letter-spacing: -1.4px;
     color: #fff;
 }
-
 .hero p {
-    max-width: 650px;
+    color: #a3a3a3;
     line-height: 1.8;
-    color: #cbd5e1;
-    font-size: 15px;
 }
-
-.section-title {
-    font-size: 22px;
-    font-weight: 800;
-    margin-top: 20px;
-    margin-bottom: 5px;
-    color: #fff;
-}
-
-.section-subtitle {
-    font-size: 13px;
-    color: #94a3b8;
-    margin-bottom: 20px;
-}
-
-.feature-card {
-    padding: 23px;
-    border-radius: 20px;
-    min-height: 225px;
-    border: 1px solid rgba(255,255,255,.1);
-    background: linear-gradient(145deg,#171c32,#111629);
-    margin-bottom: 12px;
-}
-
-.feature-icon {
-    width: 54px;
-    height: 54px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 16px;
-    font-size: 27px;
-    margin-bottom: 19px;
-}
-
-.feature-card h3 {
-    color: white;
-    font-size: 20px;
-    font-weight: 800;
-    margin-bottom: 9px;
-}
-
-.feature-card p {
-    color: #aab6cb;
-    font-size: 13px;
-    line-height: 1.75;
-}
-
-.purple {
-    background: linear-gradient(135deg,rgba(139,92,246,.3),rgba(91,33,182,.12));
-}
-
-.cyan {
-    background: linear-gradient(135deg,rgba(6,182,212,.25),rgba(8,145,178,.10));
-}
-
-.pink {
-    background: linear-gradient(135deg,rgba(236,72,153,.23),rgba(190,24,93,.10));
-}
-
-.orange {
-    background: linear-gradient(135deg,rgba(249,115,22,.23),rgba(194,65,12,.10));
-}
-
-.workflow {
-    padding: 21px;
-    border: 1px solid rgba(255,255,255,.09);
-    border-radius: 17px;
-    background: rgba(255,255,255,.025);
-    min-height: 135px;
-}
-
-.workflow b {
-    color: #e0e7ff;
-    font-size: 14px;
-}
-
-.workflow p {
-    color: #94a3b8;
+.pill {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 30px;
+    background: #303030;
+    border: 1px solid #454545;
+    color: #d4d4d4;
     font-size: 12px;
+}
+.section-card {
+    background: #292929;
+    border: 1px solid #414141;
+    border-radius: 16px;
+    padding: 20px;
+    min-height: 135px;
+    margin-bottom: 10px;
+}
+.section-card h3 {
+    font-size: 17px;
+    color: white;
+}
+.section-card p {
+    color: #b3b3b3;
+    font-size: 13px;
     line-height: 1.7;
 }
-
-.status-dot {
-    color: #34d399;
-    font-size: 13px;
-    font-weight: 700;
-}
-
 .footer {
     text-align: center;
-    padding: 25px 5px 5px;
-    color: #64748b;
-    font-size: 12px;
-}
-
-div[data-testid="stExpander"] {
-    border-color: rgba(255,255,255,.1);
-    border-radius: 14px;
-}
-
-@media (max-width: 768px) {
-    .hero {
-        padding: 24px 20px;
-    }
-    .block-container {
-        padding-left: 1rem;
-        padding-right: 1rem;
-    }
+    color: #777;
+    font-size: 11px;
+    padding: 25px 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
+# =====================================================
 # SIDEBAR
-# =========================
+# =====================================================
 with st.sidebar:
-    st.markdown("# 🎨 Studio AI")
-    st.caption("YOUR PERSONAL CREATIVE STUDIO")
+    st.markdown("## ✨ Studio AI")
+    st.caption("AI CREATIVE WORKSPACE")
     st.divider()
 
-    st.markdown("**WORKSPACE**")
+    if st.button("＋ Percakapan Baru", use_container_width=True):
+        if st.session_state.messages:
+            st.session_state.conversations.insert(
+                0,
+                {
+                    "title": st.session_state.messages[0]["content"][:45],
+                    "messages": st.session_state.messages.copy(),
+                },
+            )
+        st.session_state.messages = []
+        st.session_state.current_chat = "Percakapan baru"
+        st.rerun()
 
-    menu = st.radio(
-        "Navigasi",
-        [
-            "Dashboard",
-            "Foto AI",
-            "Video AI",
-            "Galeri",
-            "Pengaturan",
-        ],
+    mode = st.radio(
+        "Pilih mode",
+        ["💬 Chat AI", "🖼️ Foto AI", "🎬 Video AI", "🗂️ Galeri"],
         label_visibility="collapsed",
-        key="navigation",
     )
-
-    st.session_state.active_menu = menu
 
     st.divider()
-    st.markdown("**AI WORKSPACE**")
-    st.markdown(
-        '<div style="padding:13px;border-radius:13px;'
-        'background:rgba(139,92,246,.12);'
-        'border:1px solid rgba(139,92,246,.2);">'
-        '<span style="color:#c4b5fd;font-size:12px;">'
-        '✦ CREATIVE MODE</span><br>'
-        '<span style="font-size:12px;color:#cbd5e1;">'
-        'Foto & Video AI Studio</span></div>',
-        unsafe_allow_html=True,
+    st.caption("RIWAYAT CHAT")
+
+    if st.session_state.conversations:
+        for i, conv in enumerate(st.session_state.conversations[:8]):
+            if st.button(
+                "💬 " + conv["title"],
+                key=f"history_{i}",
+                use_container_width=True,
+            ):
+                st.session_state.messages = conv["messages"].copy()
+                st.session_state.current_chat = conv["title"]
+                st.rerun()
+    else:
+        st.caption("Percakapan akan muncul di sini.")
+
+    st.divider()
+    st.caption("Studio AI · Publik")
+    st.caption("Setiap pengguna memiliki sesi tersendiri.")
+
+# =====================================================
+# CHAT AI
+# =====================================================
+if mode == "💬 Chat AI":
+
+    if not st.session_state.messages:
+        st.markdown("""
+        <div class="hero">
+            <span class="pill">✦ AI ASSISTANT</span>
+            <h1>Apa yang ingin kamu buat?</h1>
+            <p>
+            Tanyakan apa saja, kembangkan ide, tulis konten,
+            atau minta bantuan untuk proyek kreatif kamu.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        a, b, c = st.columns(3)
+        with a:
+            st.markdown("""
+            <div class="section-card">
+            <h3>💡 Ide Kreatif</h3>
+            <p>Buat konsep iklan, cerita, slogan, dan ide konten.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with b:
+            st.markdown("""
+            <div class="section-card">
+            <h3>✍️ Asisten Menulis</h3>
+            <p>Bantu menyusun teks, merangkum, dan memperbaiki tulisan.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with c:
+            st.markdown("""
+            <div class="section-card">
+            <h3>🎨 Studio Visual</h3>
+            <p>Kembangkan prompt untuk gambar dan video AI.</p>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown("### ✨ Studio AI")
+        st.caption("Percakapan dengan AI")
+
+    # Render history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    prompt = st.chat_input(
+        "Tanyakan sesuatu kepada Studio AI...",
+        max_chars=4000,
     )
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.caption("Studio AI • Creative Workspace")
+    if prompt:
+        if len(st.session_state.messages) >= MAX_CHAT_MESSAGES:
+            st.warning(
+                "Batas percakapan sesi ini tercapai. "
+                "Mulai percakapan baru untuk melanjutkan."
+            )
+        else:
+            st.session_state.messages.append(
+                {"role": "user", "content": prompt}
+            )
 
-# =========================
-# DASHBOARD
-# =========================
-if menu == "Dashboard":
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-    st.markdown("""
-    <div class="hero">
-        <span class="hero-label">✦ AI CREATIVE WORKSPACE</span>
-        <h1>Ubah Imajinasi<br>Menjadi Karya.</h1>
-        <p>
-        Selamat datang di Studio AI. Buat foto yang menakjubkan,
-        ciptakan video sinematik, dan wujudkan ide kreatif kamu
-        hanya dengan menuliskan deskripsi.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+            with st.chat_message("assistant"):
+                try:
+                    client = get_client()
 
-    # METRICS
-    m1, m2, m3, m4 = st.columns(4)
+                    api_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Kamu adalah Studio AI, asisten kreatif "
+                                "yang ramah dan membantu. Jawab dalam "
+                                "bahasa yang digunakan pengguna. "
+                                "Berikan jawaban jelas, terstruktur, "
+                                "dan jujur tentang keterbatasanmu."
+                            ),
+                        }
+                    ]
 
-    with m1:
-        st.metric("🖼️ Foto AI", st.session_state.total_foto)
+                    api_messages.extend(
+                        st.session_state.messages[-12:]
+                    )
 
-    with m2:
-        st.metric("🎬 Video AI", st.session_state.total_video)
+                    response = client.chat.completions.create(
+                        model=CHAT_MODEL,
+                        messages=api_messages,
+                        max_tokens=1000,
+                    )
 
-    with m3:
-        st.metric(
-            "✨ Total Karya",
-            st.session_state.total_foto + st.session_state.total_video,
+                    answer = (
+                        response.choices[0].message.content
+                        or "Maaf, AI tidak menghasilkan jawaban."
+                    )
+
+                    st.markdown(answer)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer}
+                    )
+                    st.session_state.chat_count += 1
+
+                    if st.session_state.current_chat == "Percakapan baru":
+                        st.session_state.current_chat = prompt[:45]
+
+                except Exception as e:
+                    error = (
+                        "Maaf, Chat AI belum dapat menjawab. "
+                        "Periksa token, akses model, saldo API, "
+                        "atau coba beberapa saat lagi.\n\n"
+                        f"Detail: {str(e)[:500]}"
+                    )
+                    st.error(error)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": error}
+                    )
+
+            st.rerun()
+
+# =====================================================
+# FOTO AI
+# =====================================================
+elif mode == "🖼️ Foto AI":
+    st.markdown("## 🖼️ Buat Foto dengan AI")
+    st.caption("Tuliskan ide kamu, lalu biarkan AI membuat gambarnya.")
+
+    with st.form("image_generator"):
+        prompt = st.text_area(
+            "Deskripsi gambar",
+            placeholder=(
+                "Contoh: Foto produk kopi premium, gelas berembun, "
+                "pencahayaan studio, latar elegan dan realistis..."
+            ),
+            height=140,
         )
 
-    with m4:
-        st.metric("⚡ Workspace", "Aktif")
+        style = st.selectbox(
+            "Gaya visual",
+            [
+                "Fotografi realistis",
+                "Sinematik",
+                "Iklan produk",
+                "Ilustrasi digital",
+                "Anime",
+                "Fantasi",
+            ],
+        )
 
-    st.markdown(
-        '<div class="section-title">Mulai Berkarya</div>'
-        '<div class="section-subtitle">'
-        'Pilih studio yang ingin kamu gunakan untuk memulai kreasi.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+        ratio = st.selectbox(
+            "Ukuran gambar",
+            ["Persegi", "Portrait", "Landscape"],
+        )
 
-    c1, c2 = st.columns(2, gap="large")
+        generate = st.form_submit_button(
+            "✨ Generate Foto",
+            use_container_width=True,
+        )
 
-    with c1:
-        st.markdown("""
-        <div class="feature-card">
-            <div class="feature-icon purple">🖼️</div>
-            <h3>AI Image Generator</h3>
-            <p>
-            Ubah teks menjadi gambar. Buat foto produk, poster promosi,
-            potret profesional, ilustrasi, dan visual sinematik
-            sesuai imajinasi kamu.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+    if generate:
+        if not get_token():
+            st.error("API belum dikonfigurasi oleh pemilik aplikasi.")
+        elif not prompt.strip():
+            st.warning("Masukkan deskripsi gambar.")
+        elif st.session_state.image_count >= MAX_IMAGES_PER_SESSION:
+            st.warning(
+                "Batas foto per sesi tercapai. "
+                "Silakan coba lagi nanti."
+            )
+        else:
+            style_prompts = {
+                "Fotografi realistis": "photorealistic photography",
+                "Sinematik": "cinematic lighting, film composition",
+                "Iklan produk": "professional commercial product photography",
+                "Ilustrasi digital": "high quality digital illustration",
+                "Anime": "detailed high quality anime art",
+                "Fantasi": "beautiful detailed fantasy art",
+            }
 
-        if st.button("✨ Buka Studio Foto AI", key="open_image"):
-            st.session_state.navigation = "Foto AI"
-            st.rerun()
+            sizes = {
+                "Persegi": (1024, 1024),
+                "Portrait": (768, 1024),
+                "Landscape": (1024, 768),
+            }
 
-    with c2:
-        st.markdown("""
-        <div class="feature-card">
-            <div class="feature-icon cyan">🎬</div>
-            <h3>AI Video Generator</h3>
-            <p>
-            Wujudkan ide menjadi video bergerak. Rancang adegan,
-            gerakan kamera, suasana, dan video promosi kreatif
-            melalui deskripsi teks.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+            width, height = sizes[ratio]
+            full_prompt = (
+                f"{prompt}. {style_prompts[style]}. "
+                "High quality, well composed."
+            )
 
-        if st.button("🚀 Buka Studio Video AI", key="open_video"):
-            st.session_state.navigation = "Video AI"
-            st.rerun()
+            with st.spinner("AI sedang membuat gambar..."):
+                try:
+                    client = get_client()
+                    image = client.text_to_image(
+                        full_prompt,
+                        model=IMAGE_MODEL,
+                        width=width,
+                        height=height,
+                    )
 
-    st.markdown(
-        '<div class="section-title">Alur Kreatif</div>'
-        '<div class="section-subtitle">'
-        'Dari ide sederhana hingga menjadi karya visual.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+                    output = io.BytesIO()
+                    image.save(output, format="PNG")
+                    data = output.getvalue()
 
-    w1, w2, w3 = st.columns(3, gap="medium")
+                    st.image(data, use_container_width=True)
+                    st.download_button(
+                        "⬇️ Download PNG",
+                        data=data,
+                        file_name=f"studio_ai_{int(time.time())}.png",
+                        mime="image/png",
+                        use_container_width=True,
+                    )
 
-    with w1:
-        st.markdown("""
-        <div class="workflow">
-            <div style="font-size:25px;margin-bottom:12px;">💡</div>
-            <b>01 · Tulis Ide</b>
-            <p>Deskripsikan visual, subjek, suasana, dan hasil yang kamu inginkan.</p>
-        </div>
-        """, unsafe_allow_html=True)
+                    st.session_state.gallery.insert(0, {
+                        "type": "Foto AI",
+                        "prompt": prompt,
+                        "data": data,
+                        "mime": "image/png",
+                        "filename": f"studio_ai_{int(time.time())}.png",
+                    })
+                    st.session_state.image_count += 1
+                    st.success("Foto berhasil dibuat.")
 
-    with w2:
-        st.markdown("""
-        <div class="workflow">
-            <div style="font-size:25px;margin-bottom:12px;">🤖</div>
-            <b>02 · Generate AI</b>
-            <p>Model AI mengolah deskripsi menjadi gambar atau video sesuai dukungan layanan.</p>
-        </div>
-        """, unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(
+                        "Generasi foto gagal. Periksa ketersediaan model, "
+                        "provider, token, dan saldo API."
+                    )
+                    st.caption(str(e)[:700])
 
-    with w3:
-        st.markdown("""
-        <div class="workflow">
-            <div style="font-size:25px;margin-bottom:12px;">📥</div>
-            <b>03 · Simpan Karya</b>
-            <p>Lihat hasilnya dan unduh file untuk kebutuhan kreatif atau promosi.</p>
-        </div>
-        """, unsafe_allow_html=True)
+# =====================================================
+# VIDEO AI
+# =====================================================
+elif mode == "🎬 Video AI":
+    st.markdown("## 🎬 Buat Video dengan AI")
+    st.caption("Buat adegan bergerak dari deskripsi teks.")
 
-    st.markdown(
-        '<div class="section-title">Creative Center</div>'
-        '<div class="section-subtitle">'
-        'Akses cepat ke ruang kerja Studio AI.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    with st.form("video_generator"):
+        prompt = st.text_area(
+            "Deskripsi video",
+            placeholder=(
+                "Contoh: Video iklan kopi, kamera perlahan mendekat, "
+                "cahaya sore, embun di gelas, gaya sinematik."
+            ),
+            height=150,
+        )
 
-    q1, q2, q3 = st.columns(3)
+        camera = st.selectbox(
+            "Gerakan kamera",
+            [
+                "Natural",
+                "Perlahan mendekat",
+                "Menjauh",
+                "Bergerak menyamping",
+                "Sinematik",
+            ],
+        )
 
-    with q1:
-        if st.button("🎨 Buat Gambar Baru"):
-            st.session_state.navigation = "Foto AI"
-            st.rerun()
+        generate = st.form_submit_button(
+            "🎬 Generate Video",
+            use_container_width=True,
+        )
 
-    with q2:
-        if st.button("🎞️ Buat Video Baru"):
-            st.session_state.navigation = "Video AI"
-            st.rerun()
+    if generate:
+        if not get_token():
+            st.error("API belum dikonfigurasi oleh pemilik aplikasi.")
+        elif not prompt.strip():
+            st.warning("Masukkan deskripsi video.")
+        elif st.session_state.video_count >= MAX_VIDEOS_PER_SESSION:
+            st.warning(
+                "Batas video per sesi tercapai. "
+                "Silakan coba lagi nanti."
+            )
+        else:
+            full_prompt = (
+                f"{prompt}. Camera movement: {camera}. "
+                "Smooth motion, coherent scene, high visual quality."
+            )
 
-    with q3:
-        if st.button("🗂️ Lihat Galeri"):
-            st.session_state.navigation = "Galeri"
-            st.rerun()
+            with st.spinner(
+                "Video sedang diproses. Proses dapat memerlukan "
+                "beberapa menit."
+            ):
+                try:
+                    client = InferenceClient(
+                        provider="fal-ai",
+                        api_key=get_token(),
+                        timeout=600,
+                    )
 
-    st.markdown("""
-    <div class="footer">
-        STUDIO AI · CREATIVE WORKSPACE<br>
-        Transform your imagination into visual art.
-    </div>
-    """, unsafe_allow_html=True)
+                    result = client.text_to_video(
+                        full_prompt,
+                        model=VIDEO_MODEL,
+                    )
 
-# =========================
-# HALAMAN SEMENTARA
-# =========================
-elif menu == "Foto AI":
-    st.markdown("## 🖼️ Studio Foto AI")
-    st.info(
-        "Dashboard Foto AI sudah disiapkan. "
-        "Modul generasi gambar dan koneksi API akan ditambahkan pada tahap berikutnya."
-    )
-    prompt = st.text_area(
-        "Deskripsikan foto yang ingin kamu buat",
-        placeholder="Contoh: Foto produk kopi premium dengan pencahayaan studio...",
-        height=150,
-    )
-    st.selectbox(
-        "Gaya visual",
-        ["Realistis", "Sinematik", "Iklan Produk", "Ilustrasi", "Anime"],
-    )
-    st.button("✨ Generate Foto", disabled=True)
-    st.caption("Tombol generasi diaktifkan setelah integrasi model AI.")
+                    if hasattr(result, "read"):
+                        video_data = result.read()
+                    elif isinstance(result, bytes):
+                        video_data = result
+                    else:
+                        video_data = bytes(result)
 
-elif menu == "Video AI":
-    st.markdown("## 🎬 Studio Video AI")
-    st.info(
-        "Ruang kerja Video AI sudah disiapkan. "
-        "Koneksi model video akan ditambahkan pada tahap berikutnya."
-    )
-    st.text_area(
-        "Deskripsikan video yang ingin kamu buat",
-        placeholder="Contoh: Kamera bergerak perlahan mendekati produk...",
-        height=150,
-    )
-    st.selectbox(
-        "Gaya video",
-        ["Realistis", "Sinematik", "Iklan Produk", "Fantasi"],
-    )
-    st.button("🎬 Generate Video", disabled=True)
-    st.caption("Tombol generasi diaktifkan setelah integrasi model AI.")
+                    if not video_data:
+                        raise ValueError("Video kosong.")
 
-elif menu == "Galeri":
+                    filename = f"studio_video_{int(time.time())}.mp4"
+                    st.video(video_data)
+
+                    st.download_button(
+                        "⬇️ Download MP4",
+                        data=video_data,
+                        file_name=filename,
+                        mime="video/mp4",
+                        use_container_width=True,
+                    )
+
+                    st.session_state.gallery.insert(0, {
+                        "type": "Video AI",
+                        "prompt": prompt,
+                        "data": video_data,
+                        "mime": "video/mp4",
+                        "filename": filename,
+                    })
+                    st.session_state.video_count += 1
+                    st.success("Video berhasil dibuat.")
+
+                except Exception as e:
+                    st.error(
+                        "Generasi video gagal. Periksa akses fal-ai, "
+                        "model, saldo, dan batas waktu provider."
+                    )
+                    st.caption(str(e)[:700])
+
+# =====================================================
+# GALERI
+# =====================================================
+elif mode == "🗂️ Galeri":
     st.markdown("## 🗂️ Galeri Karya")
-    st.info(
-        "Galeri akan menampilkan hasil foto dan video yang berhasil "
-        "dibuat setelah modul AI diintegrasikan."
-    )
-    st.markdown("### Koleksi Studio")
-    st.write("Belum ada karya. Mulai berkarya dari menu Foto AI atau Video AI.")
+    st.caption("Karya yang dibuat dalam sesi browser ini.")
 
-elif menu == "Pengaturan":
-    st.markdown("## ⚙️ Pengaturan Studio AI")
-    st.markdown("### Workspace")
-    st.write("Nama aplikasi: Studio AI")
-    st.write("Platform: Streamlit Cloud")
-    st.write("Mode: AI Creative Workspace")
+    if not st.session_state.gallery:
+        st.info("Belum ada karya. Mulai dari menu Foto AI atau Video AI.")
+    else:
+        for i, item in enumerate(st.session_state.gallery):
+            with st.container(border=True):
+                st.markdown(f"**{item['type']}**")
+                st.caption(item["prompt"])
 
-    st.markdown("### Integrasi AI")
-    st.warning(
-        "API belum dihubungkan. Token akan disimpan secara aman "
-        "menggunakan Streamlit Secrets saat tahap integrasi."
-    )
+                if item["mime"].startswith("image/"):
+                    st.image(item["data"], use_container_width=True)
+                else:
+                    st.video(item["data"])
 
-    st.link_button(
-        "Buka Hugging Face",
-        "https://huggingface.co/",
-        use_container_width=True,
-    )
+                st.download_button(
+                    "⬇️ Download",
+                    data=item["data"],
+                    file_name=item["filename"],
+                    mime=item["mime"],
+                    key=f"gallery_download_{i}",
+                )
 
-    st.link_button(
-        "Buka Streamlit Cloud",
-        "https://share.streamlit.io/",
-        use_container_width=True,
-    )
+# =====================================================
+# FOOTER
+# =====================================================
+st.markdown("""
+<div class="footer">
+STUDIO AI · AI CREATIVE WORKSPACE<br>
+Powered by Streamlit and AI inference providers.
+</div>
+""", unsafe_allow_html=True)
