@@ -200,7 +200,7 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
         interaction = client.interactions.create(
             model=model,
             input=prompt,
-            response_format={"type": "image", "mime_type": "image/png", "aspect_ratio": aspect_ratio, "image_size": "1K"},
+            response_format={"type": "image", "mime_type": "image/jpeg", "aspect_ratio": aspect_ratio, "image_size": "1K"},
         )
     else:
         interaction = client.interactions.create(
@@ -209,7 +209,7 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
                 {"type": "text", "text": "Edit gambar yang diberikan sesuai instruksi. Pertahankan subjek utama bila relevan. Untuk poster, gunakan Bahasa Indonesia yang benar dan teks mudah dibaca. Hindari klaim kesehatan yang tidak diminta. Instruksi: " + instruction},
                 {"type": "image", "data": base64.b64encode(image_bytes).decode("utf-8"), "mime_type": mime_type},
             ],
-            response_format={"type": "image", "mime_type": "image/png", "aspect_ratio": aspect_ratio, "image_size": "1K"},
+            response_format={"type": "image", "mime_type": "image/jpeg", "aspect_ratio": aspect_ratio, "image_size": "1K"},
         )
     return extract_image_bytes(interaction)
 
@@ -434,10 +434,10 @@ elif page == "🖼️ Foto AI":
         st.image(st.session_state.edited_image_bytes, use_container_width=True)
         col1, col2 = st.columns(2)
         with col1:
-            st.download_button("⬇️ Unduh hasil foto (PNG)", data=st.session_state.edited_image_bytes, file_name="studio_promkes_hasil.png", mime="image/png", use_container_width=True, key="download_edited_image")
+            st.download_button("⬇️ Unduh hasil foto (JPG)", data=st.session_state.edited_image_bytes, file_name="studio_promkes_hasil.jpg", mime="image/jpeg", use_container_width=True, key="download_edited_image")
         with col2:
             if st.button("➕ Simpan hasil ke Galeri", use_container_width=True, key="save_edited_image"):
-                st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_hasil.png", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
+                st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_hasil.jpg", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
                 st.success("Hasil foto disimpan ke Galeri sesi.")
     with st.expander("🔑 Cara memasang GEMINI_API_KEY"):
         st.markdown("1. Buka [Google AI Studio](https://aistudio.google.com/) dan buat API key.\n2. Buka aplikasi di Streamlit Community Cloud.\n3. Buka **App settings → Secrets**.\n4. Tambahkan baris berikut dan ganti teks contoh dengan API key milikmu:\n```toml\nGEMINI_API_KEY = \"TEMPEL_API_KEY_DI_SINI\"\n```\n5. Simpan, lalu restart aplikasi bila diminta. Jangan kirim API key ke chat atau GitHub.")
