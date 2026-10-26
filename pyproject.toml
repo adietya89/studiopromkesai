@@ -1,3 +1,4 @@
+
 [project]
 name = "blank-app-template"
 version = "0.1.0"
@@ -6,6 +7,10 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "streamlit>=1.61.1",
+    "google-genai",
+    "groq",
+    "pillow",
+    "imageio-ffmpeg",
 ]
 
 [tool.uv]
