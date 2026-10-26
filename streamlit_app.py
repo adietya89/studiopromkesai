@@ -81,7 +81,16 @@ def get_gemini_client():
         raise RuntimeError("GEMINI_API_KEY belum dipasang di Streamlit Secrets.")
     if genai is None:
         raise RuntimeError("Paket google-genai belum terpasang. Perbarui requirements.txt lalu redeploy.")
-    return genai.Client(api_key=api_key)
+    # Batasi waktu tunggu request agar aplikasi tidak berputar tanpa batas.
+    # google-genai menerima timeout dalam milidetik melalui HttpOptions.
+    try:
+        return genai.Client(
+            api_key=api_key,
+            http_options={"timeout": 120_000},
+        )
+    except TypeError:
+        # Kompatibilitas untuk versi SDK lama; timeout akan ditangani oleh SDK.
+        return genai.Client(api_key=api_key)
 
 
 def extract_image_bytes(interaction):
@@ -428,7 +437,10 @@ elif page == "🖼️ Foto AI":
                 st.success("Gambar berhasil dibuat!" if not uploaded_image else "Foto berhasil diedit!")
             except Exception as exc:
                 st.error("Foto belum berhasil diproses.")
-                st.caption(str(exc))
+                error_text = str(exc)
+                if any(word in error_text.lower() for word in ["timeout", "timed out", "deadline"]):
+                    st.warning("Permintaan ke Gemini melewati batas tunggu 2 menit. Coba lagi nanti dengan prompt lebih sederhana, atau periksa akses model dan kuota API.")
+                st.caption(error_text[:1200])
     if st.session_state.get("edited_image_bytes"):
         st.markdown("### 🖼️ Hasil Foto AI")
         st.image(st.session_state.edited_image_bytes, use_container_width=True)
