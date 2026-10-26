@@ -1,10 +1,20 @@
 
 import os
 import io
+import json
+import base64
+import subprocess
+import tempfile
+from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
 from PIL import Image
+
+try:
+    import imageio_ffmpeg
+except ImportError:
+    imageio_ffmpeg = None
 
 # AI providers bersifat opsional agar dashboard tetap bisa dibuka
 # walaupun paket atau API key AI belum tersedia.
@@ -40,6 +50,7 @@ PAGES = [
 
 GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 GROQ_MODEL_DEFAULT = "llama-3.3-70b-versatile"
+IMAGE_MODEL_DEFAULT = "gemini-nano-banana-2.1"
 
 
 # =========================================================
@@ -259,6 +270,135 @@ def ask_ai(history, prompt):
 
 
 # =========================================================
+# FOTO AI: EDIT GAMBAR DENGAN GEMINI
+# =========================================================
+def edit_image_with_gemini(image_bytes, mime_type, instruction):
+    """Mengedit gambar menggunakan model Gemini yang mendukung output gambar."""
+    api_key = get_secret("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY belum dipasang di Streamlit Secrets.")
+    if genai is None:
+        raise RuntimeError("Paket google-genai belum terpasang. Tambahkan ke requirements.txt.")
+
+    client = genai.Client(api_key=api_key)
+    interaction = client.interactions.create(
+        model=get_secret("GEMINI_IMAGE_MODEL", IMAGE_MODEL_DEFAULT),
+        input=[
+            {"type": "text", "text": (
+                "Edit gambar yang diberikan sesuai instruksi berikut. "
+                "Pertahankan subjek utama dan jangan menambahkan klaim kesehatan yang tidak diminta. "
+                "Jika membuat poster, gunakan Bahasa Indonesia yang benar dan teks yang mudah dibaca. "
+                "Instruksi pengguna: " + instruction
+            )},
+            {"type": "image", "data": base64.b64encode(image_bytes).decode("utf-8"), "mime_type": mime_type},
+        ],
+    )
+
+    # SDK dapat mengembalikan gambar melalui output_image atau steps.
+    output_image = getattr(interaction, "output_image", None)
+    if output_image and getattr(output_image, "data", None):
+        return base64.b64decode(output_image.data)
+
+    for step in getattr(interaction, "steps", []) or []:
+        if getattr(step, "type", "") == "model_output":
+            for block in getattr(step, "content", []) or []:
+                if getattr(block, "type", "") == "image":
+                    data = getattr(block, "data", None)
+                    if data:
+                        return base64.b64decode(data)
+    raise RuntimeError("Gemini tidak mengembalikan gambar. Coba perintah yang lebih sederhana atau periksa model/API.")
+
+
+def get_ffmpeg_path():
+    if imageio_ffmpeg is None:
+        raise RuntimeError("Paket imageio-ffmpeg belum terpasang. Tambahkan ke requirements.txt.")
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def make_video_edit_plan(instruction):
+    """Minta Gemini menerjemahkan perintah pengguna menjadi operasi video sederhana."""
+    prompt = f"""Ubah perintah edit video berikut menjadi JSON SAJA, tanpa markdown.
+Perintah pengguna: {instruction!r}
+Gunakan hanya skema ini:
+{{"trim_seconds": null, "aspect": "original", "grayscale": false, "brightness": 0.0, "mute": false}}
+Aturan:
+- trim_seconds: angka detik jika pengguna meminta video dipotong menjadi durasi tertentu (maksimal 180), selain itu null.
+- aspect: salah satu dari original, vertical, horizontal, square. Pilih vertical untuk Reels/TikTok, horizontal untuk YouTube, square untuk 1:1.
+- grayscale: true hanya jika diminta hitam putih/monokrom.
+- brightness: angka antara -0.15 dan 0.15, selain itu 0.0.
+- mute: true jika diminta menghilangkan suara, selain itu false.
+Jangan menambahkan operasi lain. Jika instruksi tidak jelas, gunakan nilai default."""
+    answer = ask_gemini([], prompt)
+    if not answer:
+        raise RuntimeError("Gemini belum dapat membuat rencana edit video. Pastikan GEMINI_API_KEY aktif.")
+    cleaned = answer.strip().replace("```json", "").replace("```", "").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise RuntimeError("AI memberikan format rencana yang tidak valid. Coba tulis perintah lebih sederhana.")
+    plan = json.loads(cleaned[start:end + 1])
+    # Validasi nilai untuk mencegah perintah eksternal masuk ke FFmpeg.
+    aspect = plan.get("aspect", "original")
+    if aspect not in {"original", "vertical", "horizontal", "square"}:
+        aspect = "original"
+    try:
+        trim = float(plan.get("trim_seconds")) if plan.get("trim_seconds") is not None else None
+    except (TypeError, ValueError):
+        trim = None
+    if trim is not None:
+        trim = max(1.0, min(trim, 180.0))
+    try:
+        brightness = max(-0.15, min(0.15, float(plan.get("brightness", 0.0))))
+    except (TypeError, ValueError):
+        brightness = 0.0
+    return {
+        "trim_seconds": trim,
+        "aspect": aspect,
+        "grayscale": bool(plan.get("grayscale", False)),
+        "brightness": brightness,
+        "mute": bool(plan.get("mute", False)),
+    }
+
+
+def process_video(input_bytes, plan):
+    """Menerapkan edit dasar dengan FFmpeg; bukan generasi ulang video."""
+    ffmpeg = get_ffmpeg_path()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = Path(temp_dir) / "input_video"
+        output_path = Path(temp_dir) / "hasil_edit.mp4"
+        input_path.write_bytes(input_bytes)
+        command = [ffmpeg, "-y", "-i", str(input_path)]
+        if plan.get("trim_seconds"):
+            command += ["-t", str(plan["trim_seconds"])]
+
+        filters = []
+        aspect = plan.get("aspect", "original")
+        if aspect == "vertical":
+            filters.append("scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280")
+        elif aspect == "horizontal":
+            filters.append("scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720")
+        elif aspect == "square":
+            filters.append("scale=720:720:force_original_aspect_ratio=increase,crop=720:720")
+        if plan.get("grayscale"):
+            filters.append("hue=s=0")
+        brightness = float(plan.get("brightness", 0.0))
+        if abs(brightness) > 0.001:
+            filters.append(f"eq=brightness={brightness:.3f}")
+        if filters:
+            command += ["-vf", ",".join(filters)]
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
+        if plan.get("mute"):
+            command += ["-an"]
+        else:
+            command += ["-c:a", "aac", "-b:a", "128k"]
+        command += ["-movflags", "+faststart", str(output_path)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0 or not output_path.exists():
+            # Jangan memunculkan log FFmpeg yang sangat panjang ke layar.
+            raise RuntimeError("Video gagal diproses. Coba video MP4 yang lebih kecil atau instruksi lebih sederhana.")
+        return output_path.read_bytes()
+
+
+# =========================================================
 # SESSION STATE
 # =========================================================
 if "messages" not in st.session_state:
@@ -275,6 +415,12 @@ if "video_prompt" not in st.session_state:
 
 if "storyboard" not in st.session_state:
     st.session_state.storyboard = []
+
+if "edited_image_bytes" not in st.session_state:
+    st.session_state.edited_image_bytes = None
+
+if "edited_video_bytes" not in st.session_state:
+    st.session_state.edited_video_bytes = None
 
 
 # =========================================================
@@ -397,9 +543,9 @@ if page == "🏠 Dashboard":
         )
 
     st.info(
-        "Chat AI memerlukan API key. Foto AI dan Video AI pada versi "
-        "ini membuat prompt, bukan menghasilkan gambar atau video "
-        "secara langsung."
+        "Chat AI, edit foto, dan perintah edit video memerlukan GEMINI_API_KEY. "
+        "Edit foto memakai model gambar Gemini; edit video saat ini menerapkan "
+        "operasi dasar pada video yang diunggah."
     )
 
 
@@ -481,232 +627,170 @@ elif page == "💬 Chat AI":
 # FOTO AI
 # =========================================================
 elif page == "🖼️ Foto AI":
+    st.subheader("🖼️ Foto AI — Edit Foto dengan Perintah AI")
+    st.write("Unggah foto atau poster, tulis perubahan yang kamu inginkan, lalu minta Gemini mengedit gambar tersebut.")
 
-    st.subheader("🖼️ Foto AI — Pembuat Prompt Poster")
-
-    st.write(
-        "Buat prompt poster kesehatan yang dapat digunakan "
-        "di layanan desain atau generator gambar."
-    )
-
-    with st.form("foto_form"):
-        theme = st.text_input(
-            "Tema poster",
-            placeholder="Contoh: pencegahan demam berdarah",
-        )
-
-        audience = st.selectbox(
-            "Sasaran",
-            [
-                "Masyarakat umum",
-                "Anak sekolah",
-                "Remaja",
-                "Ibu dan keluarga",
-                "Lansia",
-                "Tenaga kesehatan",
-            ],
-        )
-
-        style = st.selectbox(
-            "Gaya desain",
-            [
-                "Infografik profesional",
-                "Ilustrasi modern dan ceria",
-                "Flat design",
-                "Kartun edukasi",
-                "Fotorealistis",
-            ],
-        )
-
-        format_image = st.selectbox(
-            "Format",
-            [
-                "Poster vertikal 4:5",
-                "Instagram 1:1",
-                "Story 9:16",
-                "Presentasi 16:9",
-            ],
-        )
-
-        colors = st.text_input(
-            "Warna utama",
-            value="biru, hijau, putih",
-        )
-
-        make_prompt = st.form_submit_button(
-            "✨ Buat prompt gambar",
-            use_container_width=True,
-        )
-
-    if make_prompt:
-        if not theme.strip():
-            st.warning("Isi tema poster terlebih dahulu.")
-        else:
-            st.session_state.image_prompt = (
-                f"Buat desain {format_image} bertema "
-                f"'{theme.strip()}' untuk {audience.lower()}. "
-                f"Gaya desain: {style}. Warna utama: {colors}. "
-                "Buat desain promosi kesehatan masyarakat Indonesia "
-                "yang profesional, ramah, mudah dibaca di ponsel, "
-                "memiliki judul yang jelas dan ilustrasi yang relevan. "
-                "Gunakan Bahasa Indonesia yang benar. Hindari klaim "
-                "medis berlebihan. Sisakan ruang untuk logo dan "
-                "kontak resmi instansi."
-            )
-
-    if st.session_state.image_prompt:
-        st.text_area(
-            "Prompt siap disalin",
-            value=st.session_state.image_prompt,
-            height=190,
-        )
-
-    st.markdown("### 🌐 Buka layanan gambar")
-
-    st.markdown(
-        "- [Google Gemini](https://gemini.google.com/)\n"
-        "- [Microsoft Designer](https://designer.microsoft.com/)\n"
-        "- [Adobe Firefly](https://firefly.adobe.com/)\n"
-        "- [Canva](https://www.canva.com/)"
-    )
+    if not get_secret("GEMINI_API_KEY"):
+        st.warning("Fitur edit foto memerlukan GEMINI_API_KEY. Tambahkan dahulu melalui Settings → Secrets di Streamlit Community Cloud. Jangan menaruh API key langsung di kode.")
 
     uploaded_image = st.file_uploader(
-        "Unggah hasil gambar ke galeri sesi",
+        "📤 Unggah foto yang ingin diedit",
         type=["png", "jpg", "jpeg", "webp"],
         key="upload_image",
     )
+    image_instruction = st.text_area(
+        "✍️ Perintah edit foto",
+        placeholder="Contoh: Ubah foto ini menjadi poster edukasi pencegahan DBD, tambahkan judul 'Cegah DBD', warna biru-hijau, dan ajakan 3M Plus.",
+        height=110,
+        key="image_edit_instruction",
+    )
 
     if uploaded_image:
-        try:
-            image_bytes = uploaded_image.getvalue()
-            Image.open(io.BytesIO(image_bytes)).verify()
+        st.markdown("#### Foto asli")
+        st.image(uploaded_image.getvalue(), use_container_width=True)
 
-            if st.button("➕ Simpan gambar ke galeri"):
+    if st.button("✨ Proses Edit Foto dengan AI", type="primary", use_container_width=True, key="run_image_edit"):
+        if not uploaded_image:
+            st.warning("Unggah foto terlebih dahulu.")
+        elif not image_instruction.strip():
+            st.warning("Tuliskan perintah edit terlebih dahulu.")
+        elif not get_secret("GEMINI_API_KEY"):
+            st.error("API key Gemini belum dipasang. Lihat petunjuk di bawah.")
+        else:
+            try:
+                mime_type = uploaded_image.type or "image/jpeg"
+                with st.spinner("Gemini sedang mengedit gambar. Proses dapat memerlukan waktu dan kuota API..."):
+                    edited_bytes = edit_image_with_gemini(uploaded_image.getvalue(), mime_type, image_instruction.strip())
+                st.session_state.edited_image_bytes = edited_bytes
+                st.session_state.edited_image_prompt = image_instruction.strip()
+                st.success("Foto berhasil diproses!")
+            except Exception as exc:
+                st.error("Foto belum berhasil diedit.")
+                st.caption(str(exc))
+
+    if st.session_state.get("edited_image_bytes"):
+        st.markdown("### 🖼️ Hasil edit")
+        st.image(st.session_state.edited_image_bytes, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "⬇️ Unduh hasil foto (PNG)",
+                data=st.session_state.edited_image_bytes,
+                file_name="studio_promkes_hasil_edit.png",
+                mime="image/png",
+                use_container_width=True,
+                key="download_edited_image",
+            )
+        with col2:
+            if st.button("➕ Simpan hasil ke Galeri", use_container_width=True, key="save_edited_image"):
                 st.session_state.gallery.append({
                     "kind": "image",
-                    "name": uploaded_image.name,
-                    "data": image_bytes,
-                    "created": datetime.now().strftime(
-                        "%d-%m-%Y %H:%M"
-                    ),
+                    "name": "studio_promkes_hasil_edit.png",
+                    "data": st.session_state.edited_image_bytes,
+                    "created": datetime.now().strftime("%d-%m-%Y %H:%M"),
                 })
-                st.success("Gambar berhasil ditambahkan ke galeri sesi.")
+                st.success("Hasil foto disimpan ke Galeri sesi.")
 
-        except Exception:
-            st.error("File gambar tidak valid.")
+    with st.expander("🔑 Cara memasang GEMINI_API_KEY"):
+        st.markdown(
+            "1. Buka [Google AI Studio](https://aistudio.google.com/) dan buat API key.\n"
+            "2. Buka aplikasi Studio Promkes AI di Streamlit Community Cloud.\n"
+            "3. Buka **App settings → Secrets**.\n"
+            "4. Tambahkan baris berikut, ganti teks contoh dengan API key milikmu:\n"
+            "```toml\nGEMINI_API_KEY = \"TEMPEL_API_KEY_DI_SINI\"\n```\n"
+            "5. Simpan, lalu restart aplikasi bila diminta. Jangan kirim API key ke chat atau memasukkannya ke GitHub."
+        )
+    st.caption("Pengeditan gambar memerlukan model Gemini yang mendukung input gambar dan output gambar. Penggunaan API dapat memiliki biaya atau batas kuota.")
 
 
 # =========================================================
 # VIDEO AI
 # =========================================================
 elif page == "🎬 Video AI":
+    st.subheader("🎬 Video AI — Edit Video dengan Perintah AI")
+    st.write("Unggah video dan tulis perintah. Gemini menerjemahkan perintah menjadi langkah edit dasar, lalu FFmpeg memproses videonya.")
+    st.info("Versi ini dapat memotong durasi, mengubah format layar, membuat video hitam-putih, menyesuaikan kecerahan, dan menghilangkan suara. Ini bukan generator video baru dan belum membuat adegan baru atau menambahkan narasi otomatis.")
 
-    st.subheader("🎬 Video AI — Prompt dan Storyboard")
-
-    with st.form("video_form"):
-        theme = st.text_input(
-            "Tema video",
-            placeholder="Contoh: langkah cuci tangan yang benar",
-        )
-
-        duration = st.selectbox(
-            "Durasi video",
-            ["8 detik", "15 detik", "30 detik", "60 detik"],
-        )
-
-        style = st.selectbox(
-            "Gaya video",
-            [
-                "Animasi edukasi",
-                "Motion graphic",
-                "Kartun ramah anak",
-                "Cinematic realistis",
-                "Dokumenter singkat",
-            ],
-        )
-
-        format_video = st.selectbox(
-            "Format video",
-            [
-                "Vertikal 9:16 untuk Reels/TikTok/Shorts",
-                "Horizontal 16:9 untuk YouTube",
-                "Horizontal 16:9 untuk presentasi",
-            ],
-        )
-
-        narration = st.checkbox(
-            "Sertakan narasi Bahasa Indonesia",
-            value=True,
-        )
-
-        make_video_prompt = st.form_submit_button(
-            "🎞️ Buat prompt dan storyboard",
-            use_container_width=True,
-        )
-
-    if make_video_prompt:
-        if not theme.strip():
-            st.warning("Isi tema video terlebih dahulu.")
-        else:
-            narration_text = (
-                "Sertakan narasi Bahasa Indonesia yang natural."
-                if narration
-                else "Gunakan visual dan teks singkat tanpa narasi."
-            )
-
-            st.session_state.video_prompt = (
-                f"Buat video promosi kesehatan bertema "
-                f"'{theme.strip()}', durasi {duration}, "
-                f"gaya {style}, format {format_video}. "
-                f"{narration_text} Gunakan visual yang inklusif, "
-                "transisi rapi, teks yang mudah dibaca, informasi "
-                "yang bertanggung jawab, dan penutup berupa ajakan "
-                "mengakses sumber kesehatan resmi."
-            )
-
-            st.session_state.storyboard = [
-                "Adegan 1 — Pembuka: tampilkan situasi yang relevan.",
-                "Adegan 2 — Edukasi: sampaikan pesan utama.",
-                "Adegan 3 — Tindakan: tunjukkan langkah yang dapat dilakukan.",
-                "Adegan 4 — Penutup: ajakan bertindak dan sumber resmi.",
-            ]
-
-    if st.session_state.video_prompt:
-        st.text_area(
-            "Prompt video siap disalin",
-            value=st.session_state.video_prompt,
-            height=190,
-        )
-
-        st.markdown("### Storyboard")
-
-        for scene in st.session_state.storyboard:
-            st.markdown("- " + scene)
-
-    st.markdown("### 🌐 Buka layanan video")
-
-    st.markdown(
-        "- [Google Flow](https://flow.google.com/)\n"
-        "- [PixVerse](https://pixverse.ai/)\n"
-        "- [Adobe Firefly](https://firefly.adobe.com/)\n"
-        "- [Canva](https://www.canva.com/)"
-    )
+    if not get_secret("GEMINI_API_KEY"):
+        st.warning("Perintah bahasa alami membutuhkan GEMINI_API_KEY. Panduan pemasangan tersedia di menu Foto AI → Cara memasang GEMINI_API_KEY.")
+    if imageio_ffmpeg is None:
+        st.warning("Paket imageio-ffmpeg belum terpasang. Tambahkan `imageio-ffmpeg` ke requirements.txt lalu redeploy aplikasi.")
 
     uploaded_video = st.file_uploader(
-        "Unggah hasil video ke galeri sesi",
-        type=["mp4", "mov", "webm"],
+        "📤 Unggah video yang ingin diedit",
+        type=["mp4", "mov", "webm", "m4v"],
         key="upload_video",
     )
-
+    video_instruction = st.text_area(
+        "✍️ Perintah edit video",
+        placeholder="Contoh: Jadikan video vertikal 9:16 untuk Reels, potong menjadi 15 detik, dan naikkan sedikit kecerahannya.",
+        height=100,
+        key="video_edit_instruction",
+    )
     if uploaded_video:
-        if st.button("➕ Simpan video ke galeri"):
-            st.session_state.gallery.append({
-                "kind": "video",
-                "name": uploaded_video.name,
-                "data": uploaded_video.getvalue(),
-                "created": datetime.now().strftime("%d-%m-%Y %H:%M"),
-            })
-            st.success("Video berhasil ditambahkan ke galeri sesi.")
+        st.markdown("#### Video asli")
+        st.video(uploaded_video.getvalue())
+        st.caption(f"File: {uploaded_video.name} • {uploaded_video.size / (1024 * 1024):.1f} MB")
+
+    if st.button("🎬 Proses Edit Video dengan AI", type="primary", use_container_width=True, key="run_video_edit"):
+        if not uploaded_video:
+            st.warning("Unggah video terlebih dahulu.")
+        elif not video_instruction.strip():
+            st.warning("Tuliskan perintah edit terlebih dahulu.")
+        elif not get_secret("GEMINI_API_KEY"):
+            st.error("API key Gemini belum dipasang. Ikuti petunjuk di menu Foto AI.")
+        elif imageio_ffmpeg is None:
+            st.error("Paket imageio-ffmpeg belum tersedia. Tambahkan ke requirements.txt dan redeploy.")
+        elif uploaded_video.size > 100 * 1024 * 1024:
+            st.error("Ukuran video melebihi batas 100 MB untuk versi ini. Coba video yang lebih kecil.")
+        else:
+            try:
+                with st.spinner("AI sedang memahami perintah edit..."):
+                    plan = make_video_edit_plan(video_instruction.strip())
+                st.write("**Rencana edit dari AI:**")
+                st.json(plan)
+                with st.spinner("Sedang memproses video. Jangan tutup halaman..."):
+                    edited_video_bytes = process_video(uploaded_video.getvalue(), plan)
+                st.session_state.edited_video_bytes = edited_video_bytes
+                st.session_state.edited_video_plan = plan
+                st.success("Video berhasil diedit!")
+            except Exception as exc:
+                st.error("Video belum berhasil diproses.")
+                st.caption(str(exc))
+
+    if st.session_state.get("edited_video_bytes"):
+        st.markdown("### 🎞️ Hasil edit video")
+        st.video(st.session_state.edited_video_bytes)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "⬇️ Unduh hasil video (MP4)",
+                data=st.session_state.edited_video_bytes,
+                file_name="studio_promkes_hasil_edit.mp4",
+                mime="video/mp4",
+                use_container_width=True,
+                key="download_edited_video",
+            )
+        with col2:
+            if st.button("➕ Simpan hasil ke Galeri", use_container_width=True, key="save_edited_video"):
+                st.session_state.gallery.append({
+                    "kind": "video",
+                    "name": "studio_promkes_hasil_edit.mp4",
+                    "data": st.session_state.edited_video_bytes,
+                    "created": datetime.now().strftime("%d-%m-%Y %H:%M"),
+                })
+                st.success("Hasil video disimpan ke Galeri sesi.")
+
+    with st.expander("Contoh perintah yang didukung"):
+        st.markdown(
+            "- `Potong video menjadi 15 detik.`\n"
+            "- `Ubah menjadi vertikal 9:16 untuk Reels.`\n"
+            "- `Buat video hitam putih.`\n"
+            "- `Naikkan kecerahan sedikit.`\n"
+            "- `Hilangkan suara video.`\n"
+            "- `Jadikan horizontal 16:9 untuk YouTube dan potong menjadi 30 detik.`"
+        )
+    st.caption("Hasil tersimpan di Galeri sesi aktif dan dapat hilang saat sesi direset atau aplikasi dimulai ulang. Unduh hasil untuk menyimpan salinan permanen.")
 
 
 # =========================================================
