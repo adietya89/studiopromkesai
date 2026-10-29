@@ -4,6 +4,8 @@ import json
 import base64
 import subprocess
 import tempfile
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import datetime
 
@@ -213,30 +215,113 @@ def ask_ai(history, prompt):
 # FOTO AI: GENERATE DARI TEKS ATAU EDIT FOTO
 # =========================================================
 def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
-    """Tanpa image_bytes: membuat gambar dari teks. Dengan image_bytes: mengedit foto unggahan."""
-    client = get_gemini_client()
+    """Membuat atau mengedit gambar via Gemini REST dengan timeout nyata 120 detik."""
+    api_key = get_secret("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY belum dipasang di Streamlit Secrets.")
+
     model = get_secret("GEMINI_IMAGE_MODEL", IMAGE_MODEL_DEFAULT)
     prompt = (
         "Buat materi visual untuk promosi kesehatan masyarakat Indonesia. "
         "Gunakan desain rapi, mudah dibaca, dan Bahasa Indonesia yang benar. "
         "Hindari klaim kesehatan yang tidak didukung. Instruksi: " + instruction
     )
+
     if image_bytes is None:
-        interaction = client.interactions.create(
-            model=model,
-            input=prompt,
-            response_format={"type": "image", "mime_type": "image/jpeg", "aspect_ratio": aspect_ratio, "image_size": "1K"},
-        )
+        api_input = prompt
     else:
-        interaction = client.interactions.create(
-            model=model,
-            input=[
-                {"type": "text", "text": "Edit gambar yang diberikan sesuai instruksi. Pertahankan subjek utama bila relevan. Untuk poster, gunakan Bahasa Indonesia yang benar dan teks mudah dibaca. Hindari klaim kesehatan yang tidak diminta. Instruksi: " + instruction},
-                {"type": "image", "data": base64.b64encode(image_bytes).decode("utf-8"), "mime_type": mime_type},
-            ],
-            response_format={"type": "image", "mime_type": "image/jpeg", "aspect_ratio": aspect_ratio, "image_size": "1K"},
-        )
-    return extract_image_bytes(interaction)
+        api_input = [
+            {
+                "type": "text",
+                "text": (
+                    "Edit gambar yang diberikan sesuai instruksi. Pertahankan subjek utama bila relevan. "
+                    "Untuk poster, gunakan Bahasa Indonesia yang benar dan teks mudah dibaca. "
+                    "Hindari klaim kesehatan yang tidak diminta. Instruksi: " + instruction
+                ),
+            },
+            {
+                "type": "image",
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "mime_type": mime_type or "image/jpeg",
+            },
+        ]
+
+    payload = {
+        "model": model,
+        "input": api_input,
+        "response_format": {
+            "type": "image",
+            "mime_type": "image/jpeg",
+            "aspect_ratio": aspect_ratio,
+            "image_size": "1K",
+        },
+    }
+    request = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        # urllib timeout dalam detik; bila API menggantung, aplikasi akan kembali dengan error.
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            details = json.loads(body)
+            message = details.get("error", {}).get("message", body)
+        except Exception:
+            message = "Respons error tidak dapat dibaca."
+        if exc.code == 401 or exc.code == 403:
+            raise RuntimeError(
+                f"Gemini menolak akses (HTTP {exc.code}). Periksa API key dan akses model {model}. Detail: {message[:700]}"
+            ) from exc
+        if exc.code == 429:
+            raise RuntimeError(
+                f"Kuota atau batas permintaan Gemini tercapai (HTTP 429). Cek Usage dan Limits di Google AI Studio. Detail: {message[:700]}"
+            ) from exc
+        raise RuntimeError(f"Gemini API mengembalikan HTTP {exc.code}: {message[:900]}") from exc
+    except (TimeoutError, urllib.error.URLError) as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, (TimeoutError,)) or "timed out" in str(reason).lower():
+            raise RuntimeError(
+                "Permintaan gambar melewati batas tunggu 120 detik. Proses dihentikan agar tidak berputar terus. Periksa kuota, akses model, dan coba lagi nanti."
+            ) from exc
+        raise RuntimeError(f"Tidak dapat terhubung ke Gemini API: {str(reason)[:500]}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemini mengirim respons yang bukan JSON valid.") from exc
+
+    # Interactions API biasanya mengembalikan output_image.data dalam base64.
+    output_image = response_data.get("output_image") or {}
+    image_data = output_image.get("data") if isinstance(output_image, dict) else None
+    if image_data:
+        try:
+            return base64.b64decode(image_data)
+        except Exception as exc:
+            raise RuntimeError("Gemini mengembalikan data gambar yang tidak valid.") from exc
+
+    # Cadangan untuk respons yang mengirim gambar melalui steps.
+    for step in response_data.get("steps", []) or []:
+        if step.get("type") == "model_output":
+            for content in step.get("content", []) or []:
+                if content.get("type") == "image" and content.get("data"):
+                    try:
+                        return base64.b64decode(content["data"])
+                    except Exception as exc:
+                        raise RuntimeError("Data gambar dari Gemini tidak valid.") from exc
+
+    error = response_data.get("error")
+    if error:
+        message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"Gemini gagal membuat gambar: {message[:900]}")
+    raise RuntimeError(
+        "Gemini merespons tetapi tidak menyertakan gambar. Periksa akses model, kuota, dan respons API."
+    )
 
 # =========================================================
 # VIDEO AI: GENERATE DARI TEKS
@@ -454,9 +539,10 @@ elif page == "🖼️ Foto AI":
             except Exception as exc:
                 st.error("Foto belum berhasil diproses.")
                 error_text = str(exc)
-                if any(word in error_text.lower() for word in ["timeout", "timed out", "deadline"]):
-                    st.warning("Permintaan ke Gemini melewati batas tunggu 2 menit. Coba lagi nanti dengan prompt lebih sederhana, atau periksa akses model dan kuota API.")
-                st.caption(error_text[:1200])
+                if any(word in error_text.lower() for word in ["timeout", "timed out", "deadline", "batas tunggu"]):
+                    st.warning("Permintaan ke Gemini dihentikan setelah batas tunggu 120 detik. Coba lagi nanti dan periksa akses model serta kuota API.")
+                st.error(error_text[:1200])
+                st.caption("Jika pesan menyebut HTTP 401/403, periksa API key/akses model. Jika HTTP 429, periksa kuota dan rate limit di Google AI Studio.")
     if st.session_state.get("edited_image_bytes"):
         st.markdown("### 🖼️ Hasil Foto AI")
         st.image(st.session_state.edited_image_bytes, use_container_width=True)
