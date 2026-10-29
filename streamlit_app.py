@@ -705,8 +705,7 @@ elif page == "🖼️ Foto AI":
     aspect_ratio = {"Poster vertikal (3:4)": "3:4", "Persegi (1:1)": "1:1", "Landscape (16:9)": "16:9"}[aspect_choice]
     image_instruction = st.text_area("✍️ Deskripsi ilustrasi/latar", placeholder="Contoh: Ilustrasi petugas kesehatan Indonesia sedang menjelaskan pencegahan DBD, nyamuk dan lingkungan bersih, gaya ilustrasi modern, warna biru-hijau. Jangan buat tulisan di gambar.", height=100, key="image_edit_instruction")
     poster_title = st.text_input("🅰️ Judul poster (teks akurat)", value="AYO CEGAH PENYAKIT!", max_chars=100, key="poster_title")
-    poster_body = st.text_area("📝 Isi poster (teks akurat)", value="Jaga kebersihan diri dan lingkungan.
-Biasakan perilaku hidup bersih dan sehat.", max_chars=450, height=85, key="poster_body")
+    poster_body = st.text_area("📝 Isi poster (teks akurat)", value="Jaga kebersihan diri dan lingkungan.\nBiasakan perilaku hidup bersih dan sehat.", max_chars=450, height=85, key="poster_body")
     poster_cta = st.text_input("📣 Ajakan singkat", value="Mulai dari diri sendiri, mulai hari ini!", max_chars=120, key="poster_cta")
     st.caption("Untuk poster baru, teks ditambahkan oleh aplikasi sehingga ejaan Bahasa Indonesia tetap akurat. Jika mengedit foto yang diunggah, teks tidak ditempel otomatis.")
     if uploaded_image:
