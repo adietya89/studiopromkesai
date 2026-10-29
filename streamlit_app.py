@@ -317,36 +317,88 @@ def _generate_image_huggingface(instruction, image_bytes=None, aspect_ratio="3:4
     return output.getvalue()
 
 
+def _generate_image_cloudflare(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
+    """Fallback gambar via Cloudflare Workers AI REST API."""
+    token = get_secret("CLOUDFLARE_API_TOKEN")
+    account_id = get_secret("CLOUDFLARE_ACCOUNT_ID")
+    if not token:
+        raise RuntimeError("CLOUDFLARE_API_TOKEN belum dipasang di Streamlit Secrets.")
+    if not account_id:
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID belum dipasang di Streamlit Secrets.")
+    if image_bytes:
+        raise RuntimeError("Fallback Cloudflare saat ini mendukung pembuatan gambar dari teks, bukan edit gambar yang diunggah. Hapus foto unggahan atau gunakan Gemini dengan kuota aktif.")
+
+    prompt = (
+        "Create a polished public-health promotional image for an Indonesian audience. "
+        "Use a clear composition, respectful imagery, and avoid unsupported medical claims. "
+        "If text is needed, use Indonesian. Instruction: " + instruction
+    )
+    model = get_secret("CLOUDFLARE_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    payload = {"prompt": prompt}
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            errors = parsed.get("errors", [])
+            message = "; ".join(str(e.get("message", e)) for e in errors) or body
+        except Exception:
+            message = "Respons error tidak dapat dibaca."
+        raise RuntimeError(f"Cloudflare HTTP {exc.code}: {message[:700]}") from exc
+    except (TimeoutError, urllib.error.URLError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"Cloudflare tidak dapat dihubungi/timeout: {str(reason)[:400]}") from exc
+    result = response_data.get("result") or {}
+    image_b64 = result.get("image") if isinstance(result, dict) else None
+    if image_b64:
+        return base64.b64decode(image_b64)
+    raise RuntimeError("Cloudflare merespons tetapi tidak mengembalikan gambar. Periksa model dan respons API.")
+
+
 def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
-    """Coba Gemini dahulu, lalu otomatis beralih ke Hugging Face jika gagal."""
-    gemini_error = None
+    """Coba Gemini, lalu Hugging Face, lalu Cloudflare Workers AI."""
+    errors = []
     if get_secret("GEMINI_API_KEY"):
         try:
             image = _generate_image_gemini(instruction, image_bytes, mime_type, aspect_ratio)
             st.session_state.last_image_provider = "Gemini"
             return image
         except Exception as exc:
-            gemini_error = str(exc)
+            errors.append(("Gemini", str(exc)))
     else:
-        gemini_error = "GEMINI_API_KEY belum dipasang."
+        errors.append(("Gemini", "GEMINI_API_KEY belum dipasang."))
 
     if get_secret("HF_TOKEN"):
         try:
             image = _generate_image_huggingface(instruction, image_bytes, aspect_ratio)
             st.session_state.last_image_provider = "Hugging Face (cadangan)"
-            st.session_state.last_image_fallback_reason = gemini_error
+            st.session_state.last_image_fallback_reason = errors[-1][1]
             return image
-        except Exception as hf_exc:
-            raise RuntimeError(
-                "Gemini gagal dan AI cadangan Hugging Face juga gagal. "
-                f"Gemini: {gemini_error[:500]} | Hugging Face: {str(hf_exc)[:700]}"
-            ) from hf_exc
+        except Exception as exc:
+            errors.append(("Hugging Face", str(exc)))
 
-    raise RuntimeError(
-        "Gemini gagal dan belum ada AI gambar cadangan yang dikonfigurasi. "
-        f"Penyebab Gemini: {gemini_error[:700]} "
-        "Untuk mengaktifkan fallback otomatis, tambahkan HF_TOKEN ke Streamlit Secrets."
-    )
+    if get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID"):
+        try:
+            image = _generate_image_cloudflare(instruction, image_bytes, mime_type, aspect_ratio)
+            st.session_state.last_image_provider = "Cloudflare Workers AI (cadangan)"
+            st.session_state.last_image_fallback_reason = "; ".join(f"{name}: {msg[:250]}" for name, msg in errors)
+            return image
+        except Exception as exc:
+            errors.append(("Cloudflare", str(exc)))
+    else:
+        errors.append(("Cloudflare", "CLOUDFLARE_API_TOKEN atau CLOUDFLARE_ACCOUNT_ID belum dipasang."))
+
+    detail = " | ".join(f"{name}: {message[:650]}" for name, message in errors)
+    raise RuntimeError("Semua penyedia gambar yang dikonfigurasi gagal. " + detail)
 
 # =========================================================
 # VIDEO AI: GENERATE DARI TEKS
@@ -533,7 +585,7 @@ elif page == "💬 Chat AI":
 elif page == "🖼️ Foto AI":
     st.subheader("🖼️ Foto AI — Buat Gambar atau Edit Foto")
     st.write("Foto tidak wajib diunggah. Tanpa foto, AI membuat gambar baru dari teks. Jika foto diunggah, AI akan mengedit foto tersebut.")
-    if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN"):
+    if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
         st.warning("Pasang GEMINI_API_KEY (utama) atau HF_TOKEN (AI gambar cadangan) di App settings → Secrets. Jangan masukkan token ke kode atau GitHub.")
     uploaded_image = st.file_uploader("📤 Opsional: unggah foto untuk diedit", type=["png", "jpg", "jpeg", "webp"], key="upload_image")
     mode = "Edit foto yang diunggah" if uploaded_image else "Buat gambar baru dari teks"
@@ -547,7 +599,7 @@ elif page == "🖼️ Foto AI":
     if st.button("✨ Proses Foto AI", type="primary", use_container_width=True, key="run_image_edit"):
         if not image_instruction.strip():
             st.warning("Tuliskan ide atau perintah gambar terlebih dahulu.")
-        elif not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN"):
+        elif not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
             st.error("Pasang GEMINI_API_KEY atau HF_TOKEN di Streamlit Secrets untuk memakai Foto AI.")
         else:
             try:
@@ -562,8 +614,8 @@ elif page == "🖼️ Foto AI":
                 st.session_state.edited_image_prompt = image_instruction.strip()
                 provider_used = st.session_state.get("last_image_provider", "AI")
                 st.success(("Gambar berhasil dibuat!" if not uploaded_image else "Foto berhasil diedit!") + f" (via {provider_used})")
-                if provider_used.startswith("Hugging Face"):
-                    st.info("Gemini gagal, jadi aplikasi otomatis memakai AI cadangan Hugging Face.")
+                if provider_used.startswith("Hugging Face") or provider_used.startswith("Cloudflare"):
+                    st.info(f"Gemini gagal, jadi aplikasi otomatis memakai AI cadangan: {provider_used}.")
             except Exception as exc:
                 st.error("Foto belum berhasil diproses.")
                 error_text = str(exc)
@@ -582,8 +634,14 @@ elif page == "🖼️ Foto AI":
                 st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_hasil.jpg", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
                 st.success("Hasil foto disimpan ke Galeri sesi.")
     with st.expander("🔑 Cara memasang API utama dan AI cadangan"):
-        st.markdown("**Gemini (utama):** buat API key di [Google AI Studio](https://aistudio.google.com/).\n\n**Hugging Face (cadangan otomatis):** buat akun di [Hugging Face](https://huggingface.co/), lalu buat token dengan izin Inference Providers di [Settings → Tokens](https://huggingface.co/settings/tokens). Kredit gratis terbatas dan bisa berubah; penggunaan lebih lanjut dapat berbayar.\n\nDi Streamlit Community Cloud buka **App settings → Secrets**, lalu tambahkan (ganti nilai contoh dengan token milikmu):\n```toml\nGEMINI_API_KEY = \"API_KEY_GEMINI\"\nHF_TOKEN = \"hf_TOKEN_HUGGINGFACE\"\n```\nSimpan dan tunggu aplikasi redeploy. Jangan masukkan token ke kode atau GitHub.")
-    st.caption("Foto AI mencoba Gemini dahulu. Jika gagal, aplikasi mencoba Hugging Face otomatis jika HF_TOKEN dan kuota/provider tersedia. Kredit gratis tidak dijamin cukup untuk setiap permintaan.")
+        st.markdown("""**Gemini (utama):** buat API key di [Google AI Studio](https://aistudio.google.com/).
+
+**Hugging Face (cadangan):** buat token di [Settings → Tokens](https://huggingface.co/settings/tokens). Kredit bisa habis.
+
+**Cloudflare Workers AI (cadangan berikutnya):** tambahkan `CLOUDFLARE_API_TOKEN` dan `CLOUDFLARE_ACCOUNT_ID` dari dashboard Cloudflare. Fallback Cloudflare ini untuk pembuatan gambar dari teks; edit foto unggahan belum didukung.
+
+Di Streamlit Community Cloud buka **App settings → Secrets**, lalu tambahkan kredensial yang diperlukan. Simpan dan tunggu aplikasi redeploy. Jangan masukkan token ke kode atau GitHub.""")
+    st.caption("Foto AI mencoba Gemini, lalu Hugging Face, lalu Cloudflare Workers AI jika kredensial tersedia. Kuota/kredit dan akses model tetap berlaku. Cloudflare fallback hanya untuk prompt teks, bukan edit foto unggahan.")
 
 # =========================================================
 # VIDEO AI
