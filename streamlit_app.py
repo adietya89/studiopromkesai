@@ -212,6 +212,47 @@ def ask_ai(history, prompt):
                 errors.append(f"{name}: layanan gagal merespons. Periksa API key, model, dan log aplikasi.")
     return None, None, errors
 
+
+def create_poster_copy(topic):
+    """Generate poster wording automatically; use safe local defaults if text AI is unavailable."""
+    topic = (topic or "").strip() or "perilaku hidup bersih dan sehat"
+    prompt = (
+        "Buat konsep teks poster promosi kesehatan untuk masyarakat Indonesia berdasarkan tema: " + topic + ". "
+        "Kembalikan HANYA JSON valid dengan kunci title, body, cta. title maksimal 7 kata, "
+        "body 1-2 kalimat singkat, cta maksimal 8 kata. Gunakan Bahasa Indonesia yang alami, "
+        "mudah dibaca, tidak menakut-nakuti, dan tanpa klaim medis berlebihan."
+    )
+    try:
+        answer, provider, errors = ask_ai([], prompt)
+        if answer:
+            match = re.search(r"\{.*\}", answer, flags=re.S)
+            if match:
+                data = json.loads(match.group(0))
+                title = str(data.get("title", "")).strip()
+                body = str(data.get("body", "")).strip()
+                cta = str(data.get("cta", "")).strip()
+                if title and body and cta:
+                    return title, body, cta, provider
+    except Exception:
+        pass
+
+    low = topic.lower()
+    templates = [
+        (("dbd", "demam berdarah", "nyamuk"), ("CEGAH DBD MULAI HARI INI", "Kuras, tutup, dan daur ulang barang yang menampung air. Jaga lingkungan agar tidak menjadi tempat berkembang biak nyamuk.", "Ayo lakukan 3M Plus!")),
+        (("cuci tangan", "kebersihan tangan"), ("BIASAKAN CUCI TANGAN", "Cuci tangan pakai sabun dan air mengalir, terutama sebelum makan dan setelah dari toilet.", "Lakukan dengan benar setiap hari!")),
+        (("rokok", "merokok", "tembakau"), ("HIDUP SEHAT TANPA ROKOK", "Asap rokok membahayakan perokok dan orang di sekitarnya. Pilih lingkungan yang bersih dari asap rokok.", "Lindungi diri dan keluarga!")),
+        (("diabetes", "gula darah"), ("CEGAH DIABETES DENGAN HIDUP SEHAT", "Pilih makanan bergizi seimbang, aktif bergerak, dan lakukan pemeriksaan kesehatan secara berkala.", "Mulai kebiasaan sehat hari ini!")),
+        (("hipertensi", "tekanan darah"), ("KENDALIKAN TEKANAN DARAH", "Batasi garam, rutin bergerak, dan periksa tekanan darah secara berkala sesuai anjuran tenaga kesehatan.", "Jaga tekanan darahmu!")),
+        (("stunting", "gizi anak"), ("CEGAH STUNTING SEJAK DINI", "Penuhi gizi ibu dan anak, ikuti pemantauan tumbuh kembang, dan konsultasikan kebutuhan gizi ke tenaga kesehatan.", "Dukung anak tumbuh optimal!")),
+    ]
+    for keywords, copy in templates:
+        if any(word in low for word in keywords):
+            return (*copy, "Template otomatis")
+    title = "AYO HIDUP LEBIH SEHAT"
+    body = f"Kenali dan cegah {topic} dengan mencari informasi tepercaya, menerapkan kebiasaan sehat, dan berkonsultasi dengan tenaga kesehatan bila diperlukan."
+    return title, body, "Mulai langkah sehat hari ini!", "Template otomatis"
+
+
 # =========================================================
 # FOTO AI: GENERATE DARI TEKS ATAU EDIT FOTO
 # =========================================================
@@ -694,73 +735,69 @@ elif page == "💬 Chat AI":
 # FOTO AI
 # =========================================================
 elif page == "🖼️ Foto AI":
-    st.subheader("🖼️ Foto AI — Buat Gambar atau Edit Foto")
-    st.write("Foto tidak wajib diunggah. Tanpa foto, AI membuat gambar baru dari teks. Jika foto diunggah, AI akan mengedit foto tersebut.")
+    st.subheader("🖼️ Foto AI — Poster Otomatis")
+    st.write("Kamu cukup menuliskan tema jika mau. AI akan menyusun judul, isi, ajakan, dan deskripsi ilustrasi secara otomatis. Jika tema dikosongkan, aplikasi memilih tema umum perilaku hidup sehat.")
     if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-        st.warning("Pasang minimal satu penyedia gambar: GEMINI_API_KEY, HF_TOKEN, atau CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID di App settings → Secrets. Jangan masukkan token ke kode atau GitHub.")
+        st.warning("Pasang minimal satu penyedia gambar di Streamlit Secrets. Jangan masukkan token ke kode atau GitHub.")
     uploaded_image = st.file_uploader("📤 Opsional: unggah foto untuk diedit", type=["png", "jpg", "jpeg", "webp"], key="upload_image")
-    mode = "Edit foto yang diunggah" if uploaded_image else "Buat gambar baru dari teks"
-    st.info("Mode aktif: " + mode)
+    topic = st.text_input("🎯 Tema poster (opsional)", placeholder="Contoh: pencegahan DBD, gizi seimbang, kesehatan ibu dan anak", key="poster_topic")
     aspect_choice = st.selectbox("Rasio gambar", ["Poster vertikal (3:4)", "Persegi (1:1)", "Landscape (16:9)"], key="image_aspect")
     aspect_ratio = {"Poster vertikal (3:4)": "3:4", "Persegi (1:1)": "1:1", "Landscape (16:9)": "16:9"}[aspect_choice]
-    image_instruction = st.text_area("✍️ Deskripsi ilustrasi/latar", placeholder="Contoh: Ilustrasi petugas kesehatan Indonesia sedang menjelaskan pencegahan DBD, nyamuk dan lingkungan bersih, gaya ilustrasi modern, warna biru-hijau. Jangan buat tulisan di gambar.", height=100, key="image_edit_instruction")
-    poster_title = st.text_input("🅰️ Judul poster (teks akurat)", value="AYO CEGAH PENYAKIT!", max_chars=100, key="poster_title")
-    poster_body = st.text_area("📝 Isi poster (teks akurat)", value="Jaga kebersihan diri dan lingkungan.\nBiasakan perilaku hidup bersih dan sehat.", max_chars=450, height=85, key="poster_body")
-    poster_cta = st.text_input("📣 Ajakan singkat", value="Mulai dari diri sendiri, mulai hari ini!", max_chars=120, key="poster_cta")
-    st.caption("Untuk poster baru, teks ditambahkan oleh aplikasi sehingga ejaan Bahasa Indonesia tetap akurat. Jika mengedit foto yang diunggah, teks tidak ditempel otomatis.")
     if uploaded_image:
-        st.markdown("#### Foto asli")
+        st.info("Mode edit foto: AI akan mencoba mengedit foto yang diunggah. Teks poster otomatis hanya ditempel pada gambar baru.")
         st.image(uploaded_image.getvalue(), use_container_width=True)
-    if st.button("✨ Proses Foto AI", type="primary", use_container_width=True, key="run_image_edit"):
-        if not image_instruction.strip():
-            st.warning("Tuliskan ide atau perintah gambar terlebih dahulu.")
-        elif not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-            st.error("Pasang kredensial penyedia gambar di Streamlit Secrets untuk memakai Foto AI.")
+    if st.button("✨ Buat Poster Otomatis" if not uploaded_image else "✨ Edit Foto", type="primary", use_container_width=True, key="run_image_edit"):
+        if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
+            st.error("Belum ada penyedia gambar yang dikonfigurasi di Streamlit Secrets.")
         else:
             try:
-                with st.spinner("AI sedang membuat gambar. Proses dapat memerlukan waktu dan kuota API..."):
+                with st.spinner("AI sedang menyusun konsep dan membuat gambar. Mohon tunggu..."):
                     if uploaded_image:
                         image_bytes = uploaded_image.getvalue()
                         mime_type = uploaded_image.type or "image/jpeg"
+                        image_instruction = "Edit foto ini secara profesional untuk materi promosi kesehatan. Pertahankan subjek utama dan jangan menambahkan tulisan acak. Tema: " + (topic.strip() or "promosi kesehatan masyarakat Indonesia")
+                        result_bytes = generate_or_edit_image(image_instruction, image_bytes, mime_type, aspect_ratio)
+                        poster_copy = None
                     else:
-                        image_bytes, mime_type = None, "image/jpeg"
-                    result_bytes = generate_or_edit_image(image_instruction.strip(), image_bytes, mime_type, aspect_ratio)
-                    if not uploaded_image:
-                        result_bytes = add_indonesian_poster_text(
-                            result_bytes, poster_title, poster_body, poster_cta
+                        title, body, cta, copy_provider = create_poster_copy(topic)
+                        effective_topic = topic.strip() or "perilaku hidup bersih dan sehat"
+                        image_instruction = (
+                            "Buat ilustrasi/latar poster promosi kesehatan modern untuk masyarakat Indonesia tentang: "
+                            + effective_topic + ". Buat visual yang relevan, bersih, profesional, komposisi poster vertikal, "
+                            "ruang visual jelas di tengah. JANGAN tampilkan huruf, kata, angka, logo, watermark, atau tulisan apa pun; "
+                            "teks akan ditambahkan terpisah oleh aplikasi."
                         )
+                        result_bytes = generate_or_edit_image(image_instruction, None, "image/jpeg", aspect_ratio)
+                        result_bytes = add_indonesian_poster_text(result_bytes, title, body, cta)
+                        poster_copy = {"title": title, "body": body, "cta": cta, "copy_provider": copy_provider}
                 st.session_state.edited_image_bytes = result_bytes
-                st.session_state.edited_image_prompt = image_instruction.strip()
+                st.session_state.edited_image_prompt = topic.strip() or "perilaku hidup bersih dan sehat"
+                st.session_state.edited_poster_copy = poster_copy
                 provider_used = st.session_state.get("last_image_provider", "AI")
-                st.success(("Gambar berhasil dibuat!" if not uploaded_image else "Foto berhasil diedit!") + f" (via {provider_used})")
-                if provider_used.startswith("Hugging Face") or provider_used.startswith("Cloudflare"):
-                    st.info(f"Gemini gagal, jadi aplikasi otomatis memakai AI cadangan: {provider_used}.")
+                st.success(f"Poster berhasil dibuat melalui {provider_used}!" if not uploaded_image else f"Foto berhasil diedit melalui {provider_used}!")
+                if poster_copy:
+                    st.caption(f"Konsep teks: {poster_copy['copy_provider']}")
+                    with st.expander("Lihat teks poster yang dibuat otomatis"):
+                        st.markdown(f"**{poster_copy['title']}**")
+                        st.write(poster_copy['body'])
+                        st.write("Ajakan: " + poster_copy['cta'])
             except Exception as exc:
-                st.error("Foto belum berhasil diproses.")
-                error_text = str(exc)
-                if any(word in error_text.lower() for word in ["timeout", "timed out", "deadline", "batas tunggu"]):
-                    st.warning("Permintaan ke Gemini dihentikan setelah batas tunggu 120 detik. Coba lagi nanti dan periksa akses model serta kuota API.")
-                st.error(error_text[:1200])
-                st.caption("Jika pesan menyebut HTTP 401/403, periksa API key/akses model. Jika HTTP 429, periksa kuota dan rate limit di Google AI Studio.")
+                st.error("Poster belum berhasil dibuat.")
+                st.error(str(exc)[:1200])
+                st.info("Jika error menyebut kuota (HTTP 429), kredit habis (HTTP 402), atau akses model, penyedia gambar perlu kuota/akses aktif. Aplikasi akan mencoba penyedia cadangan yang sudah dikonfigurasi.")
     if st.session_state.get("edited_image_bytes"):
         st.markdown("### 🖼️ Hasil Foto AI")
         st.image(st.session_state.edited_image_bytes, use_container_width=True)
         col1, col2 = st.columns(2)
         with col1:
-            st.download_button("⬇️ Unduh hasil foto (JPG)", data=st.session_state.edited_image_bytes, file_name="studio_promkes_hasil.jpg", mime="image/jpeg", use_container_width=True, key="download_edited_image")
+            st.download_button("⬇️ Unduh poster (JPG)", data=st.session_state.edited_image_bytes, file_name="studio_promkes_poster.jpg", mime="image/jpeg", use_container_width=True, key="download_edited_image")
         with col2:
             if st.button("➕ Simpan hasil ke Galeri", use_container_width=True, key="save_edited_image"):
-                st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_hasil.jpg", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
+                st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_poster.jpg", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
                 st.success("Hasil foto disimpan ke Galeri sesi.")
-    with st.expander("🔑 Cara memasang API utama dan AI cadangan"):
-        st.markdown("""**Gemini (utama):** buat API key di [Google AI Studio](https://aistudio.google.com/).
-
-**Hugging Face (cadangan):** buat token di [Settings → Tokens](https://huggingface.co/settings/tokens). Kredit bisa habis.
-
-**Cloudflare Workers AI (cadangan berikutnya):** tambahkan `CLOUDFLARE_API_TOKEN` dan `CLOUDFLARE_ACCOUNT_ID` dari dashboard Cloudflare. Fallback Cloudflare ini untuk pembuatan gambar dari teks; edit foto unggahan belum didukung.
-
-Di Streamlit Community Cloud buka **App settings → Secrets**, lalu tambahkan kredensial yang diperlukan. Simpan dan tunggu aplikasi redeploy. Jangan masukkan token ke kode atau GitHub.""")
-    st.caption("Foto AI mencoba Gemini, lalu Hugging Face, lalu Cloudflare jika tersedia. Untuk gambar baru, judul, isi, dan ajakan ditempel sebagai teks asli oleh Pillow agar ejaan akurat. Kuota penyedia tetap berlaku.")
+    with st.expander("🔑 Pengaturan penyedia AI"):
+        st.markdown("Gemini, Hugging Face, dan Cloudflare digunakan berurutan jika kredensial tersedia. Untuk menyusun teks otomatis, aplikasi mencoba Gemini lalu Groq; jika keduanya tidak tersedia, aplikasi memakai template lokal. API gambar tetap memerlukan kuota/akses model aktif. Simpan token hanya di Streamlit Secrets.")
+    st.caption("Mode otomatis: cukup masukkan tema atau kosongkan agar aplikasi memilih tema umum. Teks poster ditempel sebagai teks asli supaya ejaan Bahasa Indonesia akurat.")
 
 # =========================================================
 # VIDEO AI
