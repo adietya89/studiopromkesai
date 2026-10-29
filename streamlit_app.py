@@ -76,21 +76,37 @@ def get_ai_status():
 
 
 def get_gemini_client():
+    """Membuat klien Gemini dengan timeout eksplisit agar request tidak menggantung."""
     api_key = get_secret("GEMINI_API_KEY")
+
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY belum dipasang di Streamlit Secrets.")
+        raise RuntimeError(
+            "GEMINI_API_KEY belum dipasang di Streamlit Secrets. "
+            "Buka App settings → Secrets dan tambahkan API key Gemini."
+        )
+
     if genai is None:
-        raise RuntimeError("Paket google-genai belum terpasang. Perbarui requirements.txt lalu redeploy.")
-    # Batasi waktu tunggu request agar aplikasi tidak berputar tanpa batas.
-    # google-genai menerima timeout dalam milidetik melalui HttpOptions.
+        raise RuntimeError(
+            "Paket google-genai belum terpasang. "
+            "Pastikan google-genai tercantum di requirements.txt lalu redeploy."
+        )
+
     try:
+        from google.genai import types
         return genai.Client(
             api_key=api_key,
-            http_options={"timeout": 120_000},
+            http_options=types.HttpOptions(timeout=120_000),
         )
-    except TypeError:
-        # Kompatibilitas untuk versi SDK lama; timeout akan ditangani oleh SDK.
-        return genai.Client(api_key=api_key)
+    except ImportError as exc:
+        raise RuntimeError(
+            "SDK google-genai tidak menyediakan konfigurasi HttpOptions. "
+            "Perbarui versi google-genai di requirements.txt lalu redeploy."
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "Klien Gemini gagal dibuat. Periksa versi paket google-genai dan konfigurasi API key. "
+            f"Detail: {str(exc)[:500]}"
+        ) from exc
 
 
 def extract_image_bytes(interaction):
