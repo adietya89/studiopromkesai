@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import re
 import base64
 import subprocess
 import tempfile
@@ -10,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     import imageio_ffmpeg
@@ -222,9 +223,10 @@ def _generate_image_gemini(instruction, image_bytes=None, mime_type="image/jpeg"
 
     model = get_secret("GEMINI_IMAGE_MODEL", IMAGE_MODEL_DEFAULT)
     prompt = (
-        "Buat materi visual untuk promosi kesehatan masyarakat Indonesia. "
-        "Gunakan desain rapi, mudah dibaca, dan Bahasa Indonesia yang benar. "
-        "Hindari klaim kesehatan yang tidak didukung. Instruksi: " + instruction
+        "Buat ILUSTRASI/LATAR visual saja untuk poster promosi kesehatan masyarakat Indonesia. "
+        "JANGAN membuat huruf, kata, angka, logo, watermark, atau tulisan apa pun di gambar. "
+        "Sisakan area yang cukup bersih di bagian atas dan bawah untuk teks yang akan ditambahkan aplikasi. "
+        "Hindari klaim kesehatan yang tidak didukung. Instruksi visual: " + instruction
     )
     if image_bytes is None:
         api_input = prompt
@@ -295,9 +297,9 @@ def _generate_image_huggingface(instruction, image_bytes=None, aspect_ratio="3:4
         raise RuntimeError("Paket huggingface_hub belum terpasang. Tambahkan huggingface_hub ke requirements.txt lalu redeploy.") from exc
 
     prompt = (
-        "Create a polished public-health promotional visual for an Indonesian audience. "
-        "Use clear composition, respectful imagery, no unsupported medical claims. "
-        "The instruction may be in Indonesian; follow it carefully: " + instruction
+        "Create ONLY a clean illustration/background for a public-health poster for an Indonesian audience. "
+        "Do NOT draw any text, letters, numbers, logos, labels, or watermark. Leave clean space at the top and bottom for text to be added later. "
+        "Use respectful imagery, no unsupported medical claims. Visual direction: " + instruction
     )
     client = InferenceClient(api_key=token, provider="auto", timeout=120)
     if image_bytes:
@@ -323,15 +325,15 @@ def _generate_image_cloudflare(instruction, image_bytes=None, mime_type="image/j
     account_id = get_secret("CLOUDFLARE_ACCOUNT_ID")
     if not token:
         raise RuntimeError("CLOUDFLARE_API_TOKEN belum dipasang di Streamlit Secrets.")
-    if not account_id:
-        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID belum dipasang di Streamlit Secrets.")
+    if not account_id or account_id.lower() == "workers ai" or not re.fullmatch(r"[a-fA-F0-9]{32}", account_id):
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID harus berupa Account ID Cloudflare 32 karakter heksadesimal, bukan nama token atau tulisan 'Workers AI'.")
     if image_bytes:
         raise RuntimeError("Fallback Cloudflare saat ini mendukung pembuatan gambar dari teks, bukan edit gambar yang diunggah. Hapus foto unggahan atau gunakan Gemini dengan kuota aktif.")
 
     prompt = (
-        "Create a polished public-health promotional image for an Indonesian audience. "
-        "Use a clear composition, respectful imagery, and avoid unsupported medical claims. "
-        "If text is needed, use Indonesian. Instruction: " + instruction
+        "Create ONLY a clean illustration/background for a public-health poster for an Indonesian audience. "
+        "Do NOT draw any text, letters, numbers, logos, labels, or watermark. Leave clean space at the top and bottom for text to be added by the app. "
+        "Use respectful imagery and avoid unsupported medical claims. Visual direction: " + instruction
     )
     model = get_secret("CLOUDFLARE_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
@@ -399,6 +401,115 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
 
     detail = " | ".join(f"{name}: {message[:650]}" for name, message in errors)
     raise RuntimeError("Semua penyedia gambar yang dikonfigurasi gagal. " + detail)
+
+def _load_poster_font(size, bold=False):
+    """Load font with Indonesian character support; use a safe fallback if unavailable."""
+    candidates = ([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ] if bold else [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ])
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_poster_text(draw, text, font, max_width):
+    """Wrap Indonesian text into lines that fit the poster width."""
+    words = str(text or "").split()
+    lines, line = [], ""
+    for word in words:
+        candidate = word if not line else line + " " + word
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            line = candidate
+        else:
+            if line:
+                lines.append(line)
+            # Break a single unusually long word safely.
+            if draw.textbbox((0, 0), word, font=font)[2] > max_width:
+                piece = ""
+                for char in word:
+                    if draw.textbbox((0, 0), piece + char, font=font)[2] > max_width and piece:
+                        lines.append(piece)
+                        piece = char
+                    else:
+                        piece += char
+                line = piece
+            else:
+                line = word
+    if line:
+        lines.append(line)
+    return lines
+
+
+def add_indonesian_poster_text(image_bytes, title, body, call_to_action="Mulai dari diri sendiri, mulai hari ini!"):
+    """Render exact text with Pillow so poster wording is not hallucinated by the image model."""
+    try:
+        base = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as exc:
+        raise RuntimeError("Gambar latar dari AI tidak dapat dibaca untuk penambahan teks.") from exc
+
+    # Keep a consistent poster layout, adapted to any provider image dimensions.
+    width, height = base.size
+    scale = max(width / 900, height / 1200, 0.75)
+    pad = max(24, int(width * 0.055))
+    header_h = max(int(height * 0.23), int(150 * scale))
+    footer_h = max(int(height * 0.18), int(125 * scale))
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    navy = (7, 59, 76, 238)
+    teal = (15, 118, 110, 232)
+    draw.rounded_rectangle((pad // 2, pad // 2, width - pad // 2, header_h), radius=max(18, int(20*scale)), fill=navy)
+
+    title_font = _load_poster_font(max(24, int(width * 0.065)), bold=True)
+    body_font = _load_poster_font(max(18, int(width * 0.032)), bold=False)
+    cta_font = _load_poster_font(max(17, int(width * 0.034)), bold=True)
+    max_text_w = width - 2 * pad
+    title_lines = _wrap_poster_text(draw, (title or "PROMOSI KESEHATAN").strip().upper(), title_font, max_text_w)
+    # Limit headline lines so it never crowds the visual.
+    title_lines = title_lines[:3]
+    line_gap = max(5, int(7 * scale))
+    title_heights = [draw.textbbox((0, 0), line, font=title_font)[3] for line in title_lines]
+    total_title_h = sum(title_heights) + line_gap * max(0, len(title_lines)-1)
+    y = max(pad // 2 + 8, (header_h - total_title_h) // 2)
+    for line, line_h in zip(title_lines, title_heights):
+        box = draw.textbbox((0, 0), line, font=title_font)
+        x = (width - (box[2]-box[0])) // 2
+        draw.text((x, y), line, font=title_font, fill=(255,255,255,255), stroke_width=max(0, int(scale)), stroke_fill=(0,0,0,90))
+        y += line_h + line_gap
+
+    # Bottom panel holds exact, selectable Indonesian text.
+    footer_top = height - footer_h
+    draw.rounded_rectangle((pad // 2, footer_top, width - pad // 2, height - pad // 2), radius=max(18, int(20*scale)), fill=teal)
+    body_text = (body or "Jaga kesehatan dengan membiasakan perilaku hidup bersih dan sehat.").strip()
+    body_lines = _wrap_poster_text(draw, body_text, body_font, max_text_w)[:5]
+    cta_lines = _wrap_poster_text(draw, (call_to_action or "").strip(), cta_font, max_text_w)[:2]
+    body_line_heights = [draw.textbbox((0,0), line, font=body_font)[3] for line in body_lines]
+    cta_line_heights = [draw.textbbox((0,0), line, font=cta_font)[3] for line in cta_lines]
+    gap = max(4, int(5*scale))
+    total_h = sum(body_line_heights) + gap * max(0,len(body_lines)-1) + (int(12*scale) if cta_lines else 0) + sum(cta_line_heights) + gap * max(0,len(cta_lines)-1)
+    y = footer_top + max(8, (footer_h-total_h)//2)
+    for line, line_h in zip(body_lines, body_line_heights):
+        box = draw.textbbox((0,0), line, font=body_font)
+        draw.text(((width-(box[2]-box[0]))//2, y), line, font=body_font, fill=(255,255,255,255))
+        y += line_h + gap
+    if cta_lines:
+        y += int(5*scale)
+    for line, line_h in zip(cta_lines, cta_line_heights):
+        box = draw.textbbox((0,0), line, font=cta_font)
+        draw.text(((width-(box[2]-box[0]))//2, y), line, font=cta_font, fill=(255,245,180,255))
+        y += line_h + gap
+
+    composed = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+    output = io.BytesIO()
+    composed.save(output, format="JPEG", quality=94, optimize=True)
+    return output.getvalue()
+
 
 # =========================================================
 # VIDEO AI: GENERATE DARI TEKS
@@ -586,13 +697,18 @@ elif page == "🖼️ Foto AI":
     st.subheader("🖼️ Foto AI — Buat Gambar atau Edit Foto")
     st.write("Foto tidak wajib diunggah. Tanpa foto, AI membuat gambar baru dari teks. Jika foto diunggah, AI akan mengedit foto tersebut.")
     if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-        st.warning("Pasang GEMINI_API_KEY (utama) atau HF_TOKEN (AI gambar cadangan) di App settings → Secrets. Jangan masukkan token ke kode atau GitHub.")
+        st.warning("Pasang minimal satu penyedia gambar: GEMINI_API_KEY, HF_TOKEN, atau CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID di App settings → Secrets. Jangan masukkan token ke kode atau GitHub.")
     uploaded_image = st.file_uploader("📤 Opsional: unggah foto untuk diedit", type=["png", "jpg", "jpeg", "webp"], key="upload_image")
     mode = "Edit foto yang diunggah" if uploaded_image else "Buat gambar baru dari teks"
     st.info("Mode aktif: " + mode)
     aspect_choice = st.selectbox("Rasio gambar", ["Poster vertikal (3:4)", "Persegi (1:1)", "Landscape (16:9)"], key="image_aspect")
     aspect_ratio = {"Poster vertikal (3:4)": "3:4", "Persegi (1:1)": "1:1", "Landscape (16:9)": "16:9"}[aspect_choice]
-    image_instruction = st.text_area("✍️ Perintah gambar", placeholder="Contoh: Buat poster edukasi pencegahan DBD untuk masyarakat Indonesia, ilustrasi petugas kesehatan, warna biru-hijau, judul 'Cegah DBD dengan 3M Plus'.", height=120, key="image_edit_instruction")
+    image_instruction = st.text_area("✍️ Deskripsi ilustrasi/latar", placeholder="Contoh: Ilustrasi petugas kesehatan Indonesia sedang menjelaskan pencegahan DBD, nyamuk dan lingkungan bersih, gaya ilustrasi modern, warna biru-hijau. Jangan buat tulisan di gambar.", height=100, key="image_edit_instruction")
+    poster_title = st.text_input("🅰️ Judul poster (teks akurat)", value="AYO CEGAH PENYAKIT!", max_chars=100, key="poster_title")
+    poster_body = st.text_area("📝 Isi poster (teks akurat)", value="Jaga kebersihan diri dan lingkungan.
+Biasakan perilaku hidup bersih dan sehat.", max_chars=450, height=85, key="poster_body")
+    poster_cta = st.text_input("📣 Ajakan singkat", value="Mulai dari diri sendiri, mulai hari ini!", max_chars=120, key="poster_cta")
+    st.caption("Untuk poster baru, teks ditambahkan oleh aplikasi sehingga ejaan Bahasa Indonesia tetap akurat. Jika mengedit foto yang diunggah, teks tidak ditempel otomatis.")
     if uploaded_image:
         st.markdown("#### Foto asli")
         st.image(uploaded_image.getvalue(), use_container_width=True)
@@ -600,7 +716,7 @@ elif page == "🖼️ Foto AI":
         if not image_instruction.strip():
             st.warning("Tuliskan ide atau perintah gambar terlebih dahulu.")
         elif not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-            st.error("Pasang GEMINI_API_KEY atau HF_TOKEN di Streamlit Secrets untuk memakai Foto AI.")
+            st.error("Pasang kredensial penyedia gambar di Streamlit Secrets untuk memakai Foto AI.")
         else:
             try:
                 with st.spinner("AI sedang membuat gambar. Proses dapat memerlukan waktu dan kuota API..."):
@@ -610,6 +726,10 @@ elif page == "🖼️ Foto AI":
                     else:
                         image_bytes, mime_type = None, "image/jpeg"
                     result_bytes = generate_or_edit_image(image_instruction.strip(), image_bytes, mime_type, aspect_ratio)
+                    if not uploaded_image:
+                        result_bytes = add_indonesian_poster_text(
+                            result_bytes, poster_title, poster_body, poster_cta
+                        )
                 st.session_state.edited_image_bytes = result_bytes
                 st.session_state.edited_image_prompt = image_instruction.strip()
                 provider_used = st.session_state.get("last_image_provider", "AI")
@@ -641,7 +761,7 @@ elif page == "🖼️ Foto AI":
 **Cloudflare Workers AI (cadangan berikutnya):** tambahkan `CLOUDFLARE_API_TOKEN` dan `CLOUDFLARE_ACCOUNT_ID` dari dashboard Cloudflare. Fallback Cloudflare ini untuk pembuatan gambar dari teks; edit foto unggahan belum didukung.
 
 Di Streamlit Community Cloud buka **App settings → Secrets**, lalu tambahkan kredensial yang diperlukan. Simpan dan tunggu aplikasi redeploy. Jangan masukkan token ke kode atau GitHub.""")
-    st.caption("Foto AI mencoba Gemini, lalu Hugging Face, lalu Cloudflare Workers AI jika kredensial tersedia. Kuota/kredit dan akses model tetap berlaku. Cloudflare fallback hanya untuk prompt teks, bukan edit foto unggahan.")
+    st.caption("Foto AI mencoba Gemini, lalu Hugging Face, lalu Cloudflare jika tersedia. Untuk gambar baru, judul, isi, dan ajakan ditempel sebagai teks asli oleh Pillow agar ejaan akurat. Kuota penyedia tetap berlaku.")
 
 # =========================================================
 # VIDEO AI
