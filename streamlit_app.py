@@ -144,54 +144,36 @@ def extract_video_bytes(interaction):
 # =========================================================
 # CHAT AI
 # =========================================================
-
 SYSTEM_PROMPT = """
-Kamu adalah asisten AI serbaguna yang cerdas, kreatif, teliti,
-dan membantu seperti asisten percakapan modern.
+Kamu adalah asisten AI serbaguna di Studio Promkes AI. Bantu pengguna seperti asisten percakapan modern untuk beragam tugas, bukan hanya promosi kesehatan.
 
-BAHASA DAN KOMUNIKASI
-- Gunakan bahasa yang dipakai pengguna.
-- Pahami maksud pengguna meskipun instruksinya singkat atau tidak formal.
-- Jangan memaksa pengguna menyusun prompt yang rumit.
-- Jika permintaan sudah jelas, langsung kerjakan tanpa bertanya lagi.
-- Jika detail tidak penting belum diberikan, pilih asumsi yang masuk akal.
+BAHASA DAN GAYA
+- Balas dalam bahasa yang digunakan pengguna; utamakan Bahasa Indonesia yang alami, jelas, ramah, dan tidak bertele-tele.
+- Pahami instruksi sehari-hari meskipun singkat atau tidak formal. Jangan meminta pengguna menyusun prompt teknis.
+- Jika maksudnya jelas, langsung kerjakan. Jika detail kecil tidak disebutkan, pilih asumsi wajar dan lanjutkan.
+- Sesuaikan format dengan tugas: daftar, tabel, langkah, contoh, kode, naskah, atau hasil jadi.
 
 KEMAMPUAN
-Bantu pengguna untuk:
-1. Menjawab pertanyaan umum dan menjelaskan berbagai topik.
-2. Menulis, mengedit, menerjemahkan, dan merangkum teks.
-3. Membuat surat, laporan, makalah, proposal, dan presentasi.
-4. Membantu matematika, pelajaran, analisis, dan pemecahan masalah.
-5. Menulis, menjelaskan, memperbaiki, dan men-debug kode.
-6. Membuat ide bisnis, rencana kerja, strategi, dan konten media sosial.
-7. Menyusun prompt, konsep desain, poster, ilustrasi, dan naskah video.
-8. Membuat materi edukasi kesehatan yang jelas dan bertanggung jawab.
-9. Menganalisis informasi atau dokumen yang benar-benar diberikan
-   oleh pengguna.
-10. Menyesuaikan panjang dan format jawaban dengan kebutuhan pengguna.
+- Menjawab pertanyaan umum, menjelaskan konsep, belajar, matematika, brainstorming, dan pemecahan masalah.
+- Menulis, menyunting, menerjemahkan, meringkas, membuat surat, laporan, proposal, makalah, presentasi, caption, dan naskah.
+- Membantu coding, membaca error, memperbaiki kode, dan menjelaskan implementasi.
+- Menyusun ide kampanye, materi edukasi, konsep poster, arahan visual, skrip video, dan konten media sosial.
+- Untuk permintaan pembuatan konten, berikan hasil yang siap digunakan, bukan hanya saran.
 
-CARA BEKERJA
-- Utamakan hasil nyata daripada penjelasan yang bertele-tele.
-- Untuk permintaan pembuatan konten, langsung berikan hasil jadi.
-- Untuk kode, berikan kode lengkap yang konsisten dan dapat dijalankan.
-- Untuk tugas bertahap, susun langkah yang jelas dan praktis.
-- Jangan mengarang fakta, sumber, hasil pengujian, atau kemampuan alat.
-- Jika membutuhkan akses internet, file, atau layanan eksternal yang
-  tidak tersedia, jelaskan keterbatasannya secara jujur.
-- Jangan mengaku telah membuat gambar, file, atau menjalankan kode
-  jika hal tersebut belum benar-benar dilakukan.
+KETELITIAN
+- Jangan mengarang fakta, kutipan, sumber, hasil pengujian, akses internet, atau tindakan yang belum dilakukan.
+- Jika tidak memiliki akses ke file, internet, atau layanan eksternal, jelaskan batasannya dengan jujur.
+- Untuk kode, prioritaskan kode konsisten dan dapat dijalankan; sebutkan dependensi dan konfigurasi yang diperlukan.
+- Bedakan fakta dari perkiraan dan opini.
 
-KESEHATAN DAN KEAMANAN
-- Untuk informasi kesehatan, gunakan penjelasan yang bertanggung jawab.
-- Jangan memberikan diagnosis pasti atau menjanjikan kesembuhan.
-- Bedakan fakta, perkiraan, dan opini.
-- Lindungi informasi pribadi dan rahasia pengguna.
+KESEHATAN
+- Materi kesehatan harus edukatif, mudah dipahami, dan tidak menakut-nakuti.
+- Jangan memberikan diagnosis pasti, menjanjikan kesembuhan, atau membuat klaim medis tanpa dasar.
+- Untuk kondisi gawat darurat, sarankan segera mencari bantuan medis.
 
-TUJUAN UTAMA
-Pahami kebutuhan pengguna, pilih pendekatan terbaik secara otomatis,
-dan berikan jawaban atau hasil yang paling berguna.
+TUJUAN
+Pahami kebutuhan pengguna, tentukan pendekatan paling sesuai secara otomatis, lalu berikan hasil paling berguna tanpa membebani pengguna dengan pertanyaan yang tidak perlu.
 """
-
 
 
 def ask_gemini(history, prompt):
@@ -257,43 +239,47 @@ def ask_ai(history, prompt):
 
 
 def create_poster_copy(topic):
-    """Generate poster wording automatically; use safe local defaults if text AI is unavailable."""
+    """Buat salinan poster ringkas; gunakan AI lalu template lokal bila layanan teks gagal."""
     topic = (topic or "").strip() or "perilaku hidup bersih dan sehat"
-    prompt = (
-        "Buat konsep teks poster promosi kesehatan untuk masyarakat Indonesia berdasarkan tema: " + topic + ". "
-        "Kembalikan HANYA JSON valid dengan kunci title, body, cta. title maksimal 7 kata, "
-        "body 1-2 kalimat singkat, cta maksimal 8 kata. Gunakan Bahasa Indonesia yang alami, "
-        "mudah dibaca, tidak menakut-nakuti, dan tanpa klaim medis berlebihan."
-    )
-    try:
-        answer, provider, errors = ask_ai([], prompt)
-        if answer:
-            match = re.search(r"\{.*\}", answer, flags=re.S)
-            if match:
-                data = json.loads(match.group(0))
-                title = str(data.get("title", "")).strip()
-                body = str(data.get("body", "")).strip()
-                cta = str(data.get("cta", "")).strip()
-                if title and body and cta:
-                    return title, body, cta, provider
-    except Exception:
-        pass
-
     low = topic.lower()
     templates = [
-        (("dbd", "demam berdarah", "nyamuk"), ("CEGAH DBD MULAI HARI INI", "Kuras, tutup, dan daur ulang barang yang menampung air. Jaga lingkungan agar tidak menjadi tempat berkembang biak nyamuk.", "Ayo lakukan 3M Plus!")),
-        (("cuci tangan", "kebersihan tangan"), ("BIASAKAN CUCI TANGAN", "Cuci tangan pakai sabun dan air mengalir, terutama sebelum makan dan setelah dari toilet.", "Lakukan dengan benar setiap hari!")),
-        (("rokok", "merokok", "tembakau"), ("HIDUP SEHAT TANPA ROKOK", "Asap rokok membahayakan perokok dan orang di sekitarnya. Pilih lingkungan yang bersih dari asap rokok.", "Lindungi diri dan keluarga!")),
-        (("diabetes", "gula darah"), ("CEGAH DIABETES DENGAN HIDUP SEHAT", "Pilih makanan bergizi seimbang, aktif bergerak, dan lakukan pemeriksaan kesehatan secara berkala.", "Mulai kebiasaan sehat hari ini!")),
-        (("hipertensi", "tekanan darah"), ("KENDALIKAN TEKANAN DARAH", "Batasi garam, rutin bergerak, dan periksa tekanan darah secara berkala sesuai anjuran tenaga kesehatan.", "Jaga tekanan darahmu!")),
-        (("stunting", "gizi anak"), ("CEGAH STUNTING SEJAK DINI", "Penuhi gizi ibu dan anak, ikuti pemantauan tumbuh kembang, dan konsultasikan kebutuhan gizi ke tenaga kesehatan.", "Dukung anak tumbuh optimal!")),
+        (("dbd", "demam berdarah", "nyamuk"), ("CEGAH DBD MULAI HARI INI", "Kuras tempat penampungan air, tutup rapat, dan daur ulang barang bekas. Cegah nyamuk berkembang biak di sekitar rumah.", "Ayo lakukan 3M Plus!")),
+        (("cuci tangan", "kebersihan tangan"), ("BIASAKAN CUCI TANGAN", "Cuci tangan pakai sabun dan air mengalir sebelum makan dan setelah dari toilet.", "Lakukan setiap hari!")),
+        (("rokok", "merokok", "tembakau"), ("HIDUP SEHAT TANPA ROKOK", "Asap rokok membahayakan kesehatan. Jaga rumah dan lingkungan bebas asap rokok.", "Lindungi diri dan keluarga!")),
+        (("diabetes", "gula darah"), ("CEGAH DIABETES DENGAN HIDUP SEHAT", "Pilih makanan bergizi seimbang, aktif bergerak, dan periksa kesehatan secara berkala.", "Mulai kebiasaan sehat hari ini!")),
+        (("hipertensi", "tekanan darah"), ("KENDALIKAN TEKANAN DARAH", "Batasi konsumsi garam, rutin bergerak, dan periksa tekanan darah secara berkala.", "Jaga kesehatan jantung!")),
+        (("stunting", "gizi anak", "gizi ibu"), ("DUKUNG ANAK TUMBUH SEHAT", "Penuhi gizi ibu dan anak, pantau tumbuh kembang, dan konsultasikan kebutuhan gizi ke tenaga kesehatan.", "Mulai dari keluarga!")),
+        (("imunisasi", "vaksin"), ("IMUNISASI LINDUNGI KITA", "Ikuti jadwal imunisasi sesuai anjuran tenaga kesehatan untuk membantu melindungi anak dari penyakit yang dapat dicegah.", "Cek jadwal di Puskesmas!")),
     ]
-    for keywords, copy in templates:
+    for keywords, result in templates:
         if any(word in low for word in keywords):
-            return (*copy, "Template otomatis")
-    title = "AYO HIDUP LEBIH SEHAT"
-    body = f"Kenali dan cegah {topic} dengan mencari informasi tepercaya, menerapkan kebiasaan sehat, dan berkonsultasi dengan tenaga kesehatan bila diperlukan."
-    return title, body, "Mulai langkah sehat hari ini!", "Template otomatis"
+            return (*result, "Template kesehatan lokal")
+
+    prompt = (
+        "Buat teks poster promosi kesehatan dalam Bahasa Indonesia tentang tema: " + topic + ". "
+        "Kembalikan JSON valid saja dengan kunci title, body, cta. title maksimal 6 kata; "
+        "body maksimal 18 kata dalam 1-2 kalimat; cta maksimal 6 kata. Teks konkret, alami, mudah dibaca, "
+        "tidak mengulang instruksi, tanpa klaim medis berlebihan."
+    )
+    try:
+        answer, provider, _errors = ask_ai([], prompt)
+        if answer:
+            match = re.search(r"\{.*?\}", answer, flags=re.S)
+            if match:
+                data = json.loads(match.group(0))
+                title = " ".join(str(data.get("title", "")).split())
+                body = " ".join(str(data.get("body", "")).split())
+                cta = " ".join(str(data.get("cta", "")).split())
+                title = " ".join(title.split()[:6])[:48].strip()
+                body = " ".join(body.split()[:18])[:145].strip()
+                cta = " ".join(cta.split()[:6])[:42].strip()
+                if title and body and cta:
+                    return title, body, cta, provider or "AI teks"
+    except Exception:
+        pass
+    return ("AYO HIDUP LEBIH SEHAT",
+            "Terapkan kebiasaan sehat, pilih informasi tepercaya, dan konsultasikan kesehatan kepada tenaga kesehatan.",
+            "Mulai dari hari ini!", "Template otomatis")
 
 
 # =========================================================
@@ -542,17 +528,17 @@ def add_indonesian_poster_text(image_bytes, title, body, call_to_action="Mulai d
     width, height = base.size
     scale = max(width / 900, height / 1200, 0.75)
     pad = max(24, int(width * 0.055))
-    header_h = max(int(height * 0.23), int(150 * scale))
-    footer_h = max(int(height * 0.18), int(125 * scale))
+    header_h = max(int(height * 0.20), int(170 * scale))
+    footer_h = max(int(height * 0.29), int(220 * scale))
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     navy = (7, 59, 76, 238)
     teal = (15, 118, 110, 232)
     draw.rounded_rectangle((pad // 2, pad // 2, width - pad // 2, header_h), radius=max(18, int(20*scale)), fill=navy)
 
-    title_font = _load_poster_font(max(24, int(width * 0.065)), bold=True)
-    body_font = _load_poster_font(max(18, int(width * 0.032)), bold=False)
-    cta_font = _load_poster_font(max(17, int(width * 0.034)), bold=True)
+    title_font = _load_poster_font(max(28, int(width * 0.068)), bold=True)
+    body_font = _load_poster_font(max(22, int(width * 0.040)), bold=False)
+    cta_font = _load_poster_font(max(22, int(width * 0.043)), bold=True)
     max_text_w = width - 2 * pad
     title_lines = _wrap_poster_text(draw, (title or "PROMOSI KESEHATAN").strip().upper(), title_font, max_text_w)
     # Limit headline lines so it never crowds the visual.
@@ -571,8 +557,10 @@ def add_indonesian_poster_text(image_bytes, title, body, call_to_action="Mulai d
     footer_top = height - footer_h
     draw.rounded_rectangle((pad // 2, footer_top, width - pad // 2, height - pad // 2), radius=max(18, int(20*scale)), fill=teal)
     body_text = (body or "Jaga kesehatan dengan membiasakan perilaku hidup bersih dan sehat.").strip()
-    body_lines = _wrap_poster_text(draw, body_text, body_font, max_text_w)[:5]
-    cta_lines = _wrap_poster_text(draw, (call_to_action or "").strip(), cta_font, max_text_w)[:2]
+    body_text = " ".join(body_text.split())[:145]
+    cta_text = " ".join((call_to_action or "Mulai dari hari ini!").split())[:42]
+    body_lines = _wrap_poster_text(draw, body_text, body_font, max_text_w)[:4]
+    cta_lines = _wrap_poster_text(draw, cta_text, cta_font, max_text_w)[:2]
     body_line_heights = [draw.textbbox((0,0), line, font=body_font)[3] for line in body_lines]
     cta_line_heights = [draw.textbbox((0,0), line, font=cta_font)[3] for line in cta_lines]
     gap = max(4, int(5*scale))
