@@ -436,6 +436,63 @@ def _generate_image_cloudflare(instruction, image_bytes=None, mime_type="image/j
     raise RuntimeError("Cloudflare merespons tetapi tidak mengembalikan gambar. Periksa model dan respons API.")
 
 
+def make_local_background(instruction, aspect_ratio="3:4"):
+    """Membuat latar poster dekoratif lokal tanpa API/kuota gambar."""
+    dimensions = {
+        "3:4": (900, 1200),
+        "1:1": (1000, 1000),
+        "16:9": (1280, 720),
+        "9:16": (720, 1280),
+    }
+    width, height = dimensions.get(aspect_ratio, (900, 1200))
+    base = Image.new("RGB", (width, height), (235, 248, 246))
+    px = base.load()
+
+    # Gradien hijau kebiruan yang lembut.
+    top = (220, 245, 240)
+    bottom = (225, 236, 252)
+    for y in range(height):
+        t = y / max(1, height - 1)
+        color = tuple(int(top[i] * (1 - t) + bottom[i] * t) for i in range(3))
+        for x in range(width):
+            px[x, y] = color
+
+    draw = ImageDraw.Draw(base, "RGBA")
+    # Lingkaran dekoratif di sudut agar latar terasa modern.
+    draw.ellipse((-width * .22, -height * .08, width * .42, height * .30),
+                 fill=(20, 148, 137, 55))
+    draw.ellipse((width * .66, height * .12, width * 1.18, height * .43),
+                 fill=(14, 116, 144, 45))
+    draw.ellipse((-width * .18, height * .72, width * .35, height * 1.08),
+                 fill=(59, 130, 246, 35))
+    draw.ellipse((width * .72, height * .76, width * 1.18, height * 1.10),
+                 fill=(16, 185, 129, 42))
+
+    # Motif daun sederhana di area tengah.
+    cx, cy = width // 2, height // 2
+    leaf_w = int(min(width, height) * .15)
+    leaf_h = int(min(width, height) * .24)
+    draw.line((cx, cy + leaf_h, cx, cy - leaf_h // 2),
+              fill=(15, 118, 110, 210), width=max(5, width // 120))
+    for side in (-1, 1):
+        for i in range(3):
+            yy = cy + int((i - 1) * leaf_h * .48)
+            xx = cx + side * int(leaf_w * .55)
+            bbox = (min(cx, xx - leaf_w // 2), min(yy, yy - leaf_h // 5),
+                    max(cx, xx + leaf_w // 2), max(yy, yy + leaf_h // 5))
+            draw.ellipse(bbox, fill=(15, 118, 110, 125))
+    # Panel terang di tengah memberi ruang visual untuk ilustrasi dan teks.
+    margin = int(width * .08)
+    draw.rounded_rectangle(
+        (margin, int(height * .27), width - margin, int(height * .73)),
+        radius=max(24, int(width * .04)), fill=(255, 255, 255, 90),
+        outline=(255, 255, 255, 180), width=max(2, width // 300)
+    )
+    output = io.BytesIO()
+    base.save(output, format="JPEG", quality=92, optimize=True)
+    return output.getvalue()
+
+
 def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
     """Coba Gemini, lalu Hugging Face, lalu Cloudflare Workers AI."""
     errors = []
@@ -469,8 +526,18 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
     else:
         errors.append(("Cloudflare", "CLOUDFLARE_API_TOKEN atau CLOUDFLARE_ACCOUNT_ID belum dipasang."))
 
+    # Jika membuat poster baru, tetap hasilkan desain lokal meski semua API
+    # tidak tersedia/kehabisan kuota. Untuk edit foto unggahan, jangan berpura-pura
+    # bahwa gambar asli sudah diedit oleh AI.
+    if image_bytes is None:
+        st.session_state.last_image_provider = "Template lokal (tanpa API gambar)"
+        st.session_state.last_image_fallback_reason = " | ".join(
+            f"{name}: {message[:250]}" for name, message in errors
+        )
+        return make_local_background(instruction, aspect_ratio)
+
     detail = " | ".join(f"{name}: {message[:650]}" for name, message in errors)
-    raise RuntimeError("Semua penyedia gambar yang dikonfigurasi gagal. " + detail)
+    raise RuntimeError("Semua penyedia gambar gagal mengedit foto unggahan. " + detail)
 
 def _load_poster_font(size, bold=False):
     """Load font with Indonesian character support; use a safe fallback if unavailable."""
@@ -769,7 +836,7 @@ elif page == "🖼️ Foto AI":
     st.subheader("🖼️ Foto AI — Poster Otomatis")
     st.write("Kamu cukup menuliskan tema jika mau. AI akan menyusun judul, isi, ajakan, dan deskripsi ilustrasi secara otomatis. Jika tema dikosongkan, aplikasi memilih tema umum perilaku hidup sehat.")
     if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-        st.warning("Pasang minimal satu penyedia gambar di Streamlit Secrets. Jangan masukkan token ke kode atau GitHub.")
+        st.info("Poster tetap bisa dibuat dengan template grafis lokal. Untuk edit foto dengan AI generatif, tambahkan penyedia gambar di Streamlit Secrets.")
     uploaded_image = st.file_uploader("📤 Opsional: unggah foto untuk diedit", type=["png", "jpg", "jpeg", "webp"], key="upload_image")
     topic = st.text_input("🎯 Tema poster (opsional)", placeholder="Contoh: pencegahan DBD, gizi seimbang, kesehatan ibu dan anak", key="poster_topic")
     aspect_choice = st.selectbox("Rasio gambar", ["Poster vertikal (3:4)", "Persegi (1:1)", "Landscape (16:9)"], key="image_aspect")
@@ -778,8 +845,12 @@ elif page == "🖼️ Foto AI":
         st.info("Mode edit foto: AI akan mencoba mengedit foto yang diunggah. Teks poster otomatis hanya ditempel pada gambar baru.")
         st.image(uploaded_image.getvalue(), use_container_width=True)
     if st.button("✨ Buat Poster Otomatis" if not uploaded_image else "✨ Edit Foto", type="primary", use_container_width=True, key="run_image_edit"):
-        if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN") and not (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID")):
-            st.error("Belum ada penyedia gambar yang dikonfigurasi di Streamlit Secrets.")
+        has_image_provider = bool(
+            get_secret("GEMINI_API_KEY") or get_secret("HF_TOKEN")
+            or (get_secret("CLOUDFLARE_API_TOKEN") and get_secret("CLOUDFLARE_ACCOUNT_ID"))
+        )
+        if uploaded_image and not has_image_provider:
+            st.error("Edit foto dengan AI memerlukan penyedia gambar aktif. Hapus unggahan untuk membuat poster template lokal.")
         else:
             try:
                 with st.spinner("AI sedang menyusun konsep dan membuat gambar. Mohon tunggu..."):
@@ -806,6 +877,12 @@ elif page == "🖼️ Foto AI":
                 st.session_state.edited_poster_copy = poster_copy
                 provider_used = st.session_state.get("last_image_provider", "AI")
                 st.success(f"Poster berhasil dibuat melalui {provider_used}!" if not uploaded_image else f"Foto berhasil diedit melalui {provider_used}!")
+                if provider_used == "Template lokal (tanpa API gambar)":
+                    st.warning("API gambar tidak tersedia atau kuotanya habis, jadi aplikasi membuat latar grafis lokal. Ini bukan gambar fotorealistis hasil AI.")
+                    reason = st.session_state.get("last_image_fallback_reason", "")
+                    if reason:
+                        with st.expander("Detail penyedia gambar yang gagal"):
+                            st.caption(reason[:1800])
                 if poster_copy:
                     st.caption(f"Konsep teks: {poster_copy['copy_provider']}")
                     with st.expander("Lihat teks poster yang dibuat otomatis"):
