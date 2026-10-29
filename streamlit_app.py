@@ -585,70 +585,95 @@ def _wrap_poster_text(draw, text, font, max_width):
 
 
 def add_indonesian_poster_text(image_bytes, title, body, call_to_action="Mulai dari diri sendiri, mulai hari ini!"):
-    """Render exact text with Pillow so poster wording is not hallucinated by the image model."""
+    """Susun poster vertikal dengan tipografi tajam, panel bersih, dan aksen editorial."""
     try:
         base = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception as exc:
-        raise RuntimeError("Gambar latar dari AI tidak dapat dibaca untuk penambahan teks.") from exc
+        raise RuntimeError("Gambar latar tidak dapat dibaca untuk penyusunan poster.") from exc
 
-    # Keep a consistent poster layout, adapted to any provider image dimensions.
+    # Poster dibuat dengan tipografi terpisah dari gambar agar ejaan Indonesia akurat.
     width, height = base.size
     scale = max(width / 900, height / 1200, 0.75)
-    pad = max(24, int(width * 0.055))
-    header_h = max(int(height * 0.20), int(170 * scale))
-    footer_h = max(int(height * 0.29), int(220 * scale))
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    navy = (7, 59, 76, 238)
-    teal = (15, 118, 110, 232)
-    draw.rounded_rectangle((pad // 2, pad // 2, width - pad // 2, header_h), radius=max(18, int(20*scale)), fill=navy)
+    pad = int(width * 0.055)
+    navy = (7, 59, 76)
+    teal = (8, 125, 112)
+    yellow = (255, 205, 67)
+    cream = (255, 252, 242)
+    ink = (18, 52, 64)
 
-    title_font = _load_poster_font(max(28, int(width * 0.068)), bold=True)
-    body_font = _load_poster_font(max(22, int(width * 0.040)), bold=False)
-    cta_font = _load_poster_font(max(22, int(width * 0.043)), bold=True)
-    max_text_w = width - 2 * pad
-    title_lines = _wrap_poster_text(draw, (title or "PROMOSI KESEHATAN").strip().upper(), title_font, max_text_w)
-    # Limit headline lines so it never crowds the visual.
-    title_lines = title_lines[:3]
-    line_gap = max(5, int(7 * scale))
-    title_heights = [draw.textbbox((0, 0), line, font=title_font)[3] for line in title_lines]
-    total_title_h = sum(title_heights) + line_gap * max(0, len(title_lines)-1)
-    y = max(pad // 2 + 8, (header_h - total_title_h) // 2)
-    for line, line_h in zip(title_lines, title_heights):
-        box = draw.textbbox((0, 0), line, font=title_font)
-        x = (width - (box[2]-box[0])) // 2
-        draw.text((x, y), line, font=title_font, fill=(255,255,255,255), stroke_width=max(0, int(scale)), stroke_fill=(0,0,0,90))
-        y += line_h + line_gap
+    # Beri sedikit wash terang agar teks tetap terbaca tanpa menutup seluruh ilustrasi.
+    wash = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    wd = ImageDraw.Draw(wash)
+    wd.rectangle((0, 0, width, int(height * .27)), fill=(255, 255, 255, 24))
+    wd.rectangle((0, int(height * .72), width, height), fill=(255, 255, 255, 18))
+    base = Image.alpha_composite(base.convert("RGBA"), wash)
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
 
-    # Bottom panel holds exact, selectable Indonesian text.
-    footer_top = height - footer_h
-    draw.rounded_rectangle((pad // 2, footer_top, width - pad // 2, height - pad // 2), radius=max(18, int(20*scale)), fill=teal)
-    body_text = (body or "Jaga kesehatan dengan membiasakan perilaku hidup bersih dan sehat.").strip()
-    body_text = " ".join(body_text.split())[:145]
-    cta_text = " ".join((call_to_action or "Mulai dari hari ini!").split())[:42]
-    body_lines = _wrap_poster_text(draw, body_text, body_font, max_text_w)[:4]
-    cta_lines = _wrap_poster_text(draw, cta_text, cta_font, max_text_w)[:2]
-    body_line_heights = [draw.textbbox((0,0), line, font=body_font)[3] for line in body_lines]
-    cta_line_heights = [draw.textbbox((0,0), line, font=cta_font)[3] for line in cta_lines]
+    # Header berbentuk kartu terang, bukan balok gelap besar.
+    header_top = int(height * .035)
+    header_bottom = int(height * .255)
+    draw.rounded_rectangle((pad, header_top, width-pad, header_bottom),
+                           radius=int(width*.045), fill=(255,252,242,238),
+                           outline=(255,255,255,245), width=max(2,int(scale*3)))
+    draw.rounded_rectangle((pad, header_top, pad+int(width*.025), header_bottom),
+                           radius=int(width*.012), fill=(*teal,255))
+
+    title_font = _load_poster_font(max(28, int(width * .064)), bold=True)
+    body_font = _load_poster_font(max(20, int(width * .032)), bold=False)
+    cta_font = _load_poster_font(max(21, int(width * .038)), bold=True)
+    max_text_w = width - 2 * pad - int(width*.055)
+    title_lines = _wrap_poster_text(draw, (title or "PROMOSI KESEHATAN").strip(), title_font, max_text_w)[:3]
+    title_heights = [draw.textbbox((0,0), line, font=title_font)[3] for line in title_lines]
     gap = max(4, int(5*scale))
-    total_h = sum(body_line_heights) + gap * max(0,len(body_lines)-1) + (int(12*scale) if cta_lines else 0) + sum(cta_line_heights) + gap * max(0,len(cta_lines)-1)
-    y = footer_top + max(8, (footer_h-total_h)//2)
-    for line, line_h in zip(body_lines, body_line_heights):
-        box = draw.textbbox((0,0), line, font=body_font)
-        draw.text(((width-(box[2]-box[0]))//2, y), line, font=body_font, fill=(255,255,255,255))
+    total_title = sum(title_heights) + gap * max(0,len(title_lines)-1)
+    y = header_top + max(8, (header_bottom-header_top-total_title)//2)
+    for line, line_h in zip(title_lines, title_heights):
+        draw.text((pad+int(width*.055), y), line, font=title_font, fill=(*navy,255), stroke_width=0)
         y += line_h + gap
-    if cta_lines:
-        y += int(5*scale)
-    for line, line_h in zip(cta_lines, cta_line_heights):
+    # Label kecil di atas judul.
+    label_font = _load_poster_font(max(14, int(width*.021)), bold=True)
+    draw.text((pad+int(width*.055), header_top+int(height*.018)), "EDUKASI KESEHATAN", font=label_font, fill=(*teal,255))
+    # Aksen kuning seperti marker di bawah judul.
+    accent_y = min(header_bottom-int(height*.018), y+int(height*.004))
+    draw.rounded_rectangle((pad+int(width*.055), accent_y, pad+int(width*.25), accent_y+max(5,int(height*.008))),
+                           radius=max(3,int(height*.004)), fill=(*yellow,255))
+
+    # Panel informasi bawah putih/mint, tidak terlalu tinggi agar ilustrasi tetap dominan.
+    footer_top = int(height * .755)
+    footer_bottom = height - int(height*.035)
+    draw.rounded_rectangle((pad, footer_top, width-pad, footer_bottom),
+                           radius=int(width*.04), fill=(242, 252, 247, 242),
+                           outline=(255,255,255,245), width=max(2,int(scale*3)))
+    draw.rounded_rectangle((pad+int(width*.025), footer_top+int(height*.018), width-pad-int(width*.025), footer_top+int(height*.026)),
+                           radius=max(3,int(height*.004)), fill=(*yellow,255))
+
+    body_text = " ".join((body or "Terapkan kebiasaan sehat dan konsultasikan kesehatan kepada tenaga kesehatan.").split())[:160]
+    cta_text = " ".join((call_to_action or "Mulai dari hari ini!").split())[:48]
+    body_lines = _wrap_poster_text(draw, body_text, body_font, width-2*pad-int(width*.10))[:4]
+    cta_lines = _wrap_poster_text(draw, cta_text, cta_font, width-2*pad-int(width*.10))[:2]
+    body_h = [draw.textbbox((0,0), line, font=body_font)[3] for line in body_lines]
+    cta_h = [draw.textbbox((0,0), line, font=cta_font)[3] for line in cta_lines]
+    body_gap = max(4,int(5*scale))
+    total = sum(body_h)+body_gap*max(0,len(body_h)-1)+int(13*scale)+sum(cta_h)+body_gap*max(0,len(cta_h)-1)
+    y = footer_top + int(height*.045) + max(0, (footer_bottom-footer_top-int(height*.065)-total)//2)
+    for line, line_h in zip(body_lines, body_h):
+        draw.text((pad+int(width*.05), y), line, font=body_font, fill=(*ink,255))
+        y += line_h + body_gap
+    y += int(8*scale)
+    cta_box_h = sum(cta_h)+body_gap*max(0,len(cta_h)-1)+int(height*.022)
+    draw.rounded_rectangle((pad+int(width*.035), y-int(height*.008), width-pad-int(width*.035), y+cta_box_h),
+                           radius=int(width*.025), fill=(*teal,255))
+    y += int(height*.003)
+    for line, line_h in zip(cta_lines, cta_h):
         box = draw.textbbox((0,0), line, font=cta_font)
-        draw.text(((width-(box[2]-box[0]))//2, y), line, font=cta_font, fill=(255,245,180,255))
-        y += line_h + gap
+        draw.text(((width-(box[2]-box[0]))//2, y), line, font=cta_font, fill=(255,255,255,255))
+        y += line_h + body_gap
 
-    composed = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+    composed = Image.alpha_composite(base, layer).convert("RGB")
     output = io.BytesIO()
-    composed.save(output, format="JPEG", quality=94, optimize=True)
+    composed.save(output, format="JPEG", quality=95, optimize=True)
     return output.getvalue()
-
 
 # =========================================================
 # VIDEO AI: GENERATE DARI TEKS
