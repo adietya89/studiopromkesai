@@ -214,11 +214,11 @@ def ask_ai(history, prompt):
 # =========================================================
 # FOTO AI: GENERATE DARI TEKS ATAU EDIT FOTO
 # =========================================================
-def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
-    """Membuat atau mengedit gambar via Gemini REST dengan timeout nyata 120 detik."""
+def _generate_image_gemini(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
+    """Mencoba membuat/mengedit gambar melalui Gemini REST API."""
     api_key = get_secret("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY belum dipasang di Streamlit Secrets.")
+        raise RuntimeError("GEMINI_API_KEY belum dipasang.")
 
     model = get_secret("GEMINI_IMAGE_MODEL", IMAGE_MODEL_DEFAULT)
     prompt = (
@@ -226,48 +226,32 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
         "Gunakan desain rapi, mudah dibaca, dan Bahasa Indonesia yang benar. "
         "Hindari klaim kesehatan yang tidak didukung. Instruksi: " + instruction
     )
-
     if image_bytes is None:
         api_input = prompt
     else:
         api_input = [
-            {
-                "type": "text",
-                "text": (
-                    "Edit gambar yang diberikan sesuai instruksi. Pertahankan subjek utama bila relevan. "
-                    "Untuk poster, gunakan Bahasa Indonesia yang benar dan teks mudah dibaca. "
-                    "Hindari klaim kesehatan yang tidak diminta. Instruksi: " + instruction
-                ),
-            },
-            {
-                "type": "image",
-                "data": base64.b64encode(image_bytes).decode("utf-8"),
-                "mime_type": mime_type or "image/jpeg",
-            },
+            {"type": "text", "text": (
+                "Edit gambar yang diberikan sesuai instruksi. Pertahankan subjek utama bila relevan. "
+                "Untuk poster, gunakan Bahasa Indonesia yang benar dan teks mudah dibaca. "
+                "Hindari klaim kesehatan yang tidak diminta. Instruksi: " + instruction
+            )},
+            {"type": "image", "data": base64.b64encode(image_bytes).decode("utf-8"),
+             "mime_type": mime_type or "image/jpeg"},
         ]
 
     payload = {
         "model": model,
         "input": api_input,
-        "response_format": {
-            "type": "image",
-            "mime_type": "image/jpeg",
-            "aspect_ratio": aspect_ratio,
-            "image_size": "1K",
-        },
+        "response_format": {"type": "image", "mime_type": "image/jpeg",
+                            "aspect_ratio": aspect_ratio, "image_size": "1K"},
     }
     request = urllib.request.Request(
         "https://generativelanguage.googleapis.com/v1beta/interactions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key,
-        },
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
-
     try:
-        # urllib timeout dalam detik; bila API menggantung, aplikasi akan kembali dengan error.
         with urllib.request.urlopen(request, timeout=120) as response:
             response_data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
@@ -277,50 +261,91 @@ def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg"
             message = details.get("error", {}).get("message", body)
         except Exception:
             message = "Respons error tidak dapat dibaca."
-        if exc.code == 401 or exc.code == 403:
-            raise RuntimeError(
-                f"Gemini menolak akses (HTTP {exc.code}). Periksa API key dan akses model {model}. Detail: {message[:700]}"
-            ) from exc
-        if exc.code == 429:
-            raise RuntimeError(
-                f"Kuota atau batas permintaan Gemini tercapai (HTTP 429). Cek Usage dan Limits di Google AI Studio. Detail: {message[:700]}"
-            ) from exc
-        raise RuntimeError(f"Gemini API mengembalikan HTTP {exc.code}: {message[:900]}") from exc
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {message[:700]}") from exc
     except (TimeoutError, urllib.error.URLError) as exc:
         reason = getattr(exc, "reason", exc)
-        if isinstance(reason, (TimeoutError,)) or "timed out" in str(reason).lower():
-            raise RuntimeError(
-                "Permintaan gambar melewati batas tunggu 120 detik. Proses dihentikan agar tidak berputar terus. Periksa kuota, akses model, dan coba lagi nanti."
-            ) from exc
-        raise RuntimeError(f"Tidak dapat terhubung ke Gemini API: {str(reason)[:500]}") from exc
+        raise RuntimeError(f"Gemini tidak dapat dihubungi/timeout: {str(reason)[:400]}") from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError("Gemini mengirim respons yang bukan JSON valid.") from exc
 
-    # Interactions API biasanya mengembalikan output_image.data dalam base64.
     output_image = response_data.get("output_image") or {}
     image_data = output_image.get("data") if isinstance(output_image, dict) else None
     if image_data:
-        try:
-            return base64.b64decode(image_data)
-        except Exception as exc:
-            raise RuntimeError("Gemini mengembalikan data gambar yang tidak valid.") from exc
-
-    # Cadangan untuk respons yang mengirim gambar melalui steps.
+        return base64.b64decode(image_data)
     for step in response_data.get("steps", []) or []:
         if step.get("type") == "model_output":
             for content in step.get("content", []) or []:
                 if content.get("type") == "image" and content.get("data"):
-                    try:
-                        return base64.b64decode(content["data"])
-                    except Exception as exc:
-                        raise RuntimeError("Data gambar dari Gemini tidak valid.") from exc
-
+                    return base64.b64decode(content["data"])
     error = response_data.get("error")
     if error:
         message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-        raise RuntimeError(f"Gemini gagal membuat gambar: {message[:900]}")
+        raise RuntimeError(f"Gemini gagal membuat gambar: {message[:700]}")
+    raise RuntimeError("Gemini merespons tetapi tidak menyertakan gambar.")
+
+
+def _generate_image_huggingface(instruction, image_bytes=None, aspect_ratio="3:4"):
+    """Fallback gambar via Hugging Face Inference Providers; memerlukan HF_TOKEN."""
+    token = get_secret("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN belum dipasang di Streamlit Secrets.")
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError as exc:
+        raise RuntimeError("Paket huggingface_hub belum terpasang. Tambahkan huggingface_hub ke requirements.txt lalu redeploy.") from exc
+
+    prompt = (
+        "Create a polished public-health promotional visual for an Indonesian audience. "
+        "Use clear composition, respectful imagery, no unsupported medical claims. "
+        "The instruction may be in Indonesian; follow it carefully: " + instruction
+    )
+    client = InferenceClient(api_key=token, provider="auto", timeout=120)
+    if image_bytes:
+        # Image-to-image fallback. Model/provider availability depends on the HF account.
+        result = client.image_to_image(
+            image_bytes,
+            prompt="Edit the provided image following this instruction: " + prompt,
+            model="black-forest-labs/FLUX.2-klein-9B",
+        )
+    else:
+        result = client.text_to_image(
+            prompt=prompt,
+            model="black-forest-labs/FLUX.1-schnell",
+        )
+    output = io.BytesIO()
+    result.convert("RGB").save(output, format="JPEG", quality=92)
+    return output.getvalue()
+
+
+def generate_or_edit_image(instruction, image_bytes=None, mime_type="image/jpeg", aspect_ratio="3:4"):
+    """Coba Gemini dahulu, lalu otomatis beralih ke Hugging Face jika gagal."""
+    gemini_error = None
+    if get_secret("GEMINI_API_KEY"):
+        try:
+            image = _generate_image_gemini(instruction, image_bytes, mime_type, aspect_ratio)
+            st.session_state.last_image_provider = "Gemini"
+            return image
+        except Exception as exc:
+            gemini_error = str(exc)
+    else:
+        gemini_error = "GEMINI_API_KEY belum dipasang."
+
+    if get_secret("HF_TOKEN"):
+        try:
+            image = _generate_image_huggingface(instruction, image_bytes, aspect_ratio)
+            st.session_state.last_image_provider = "Hugging Face (cadangan)"
+            st.session_state.last_image_fallback_reason = gemini_error
+            return image
+        except Exception as hf_exc:
+            raise RuntimeError(
+                "Gemini gagal dan AI cadangan Hugging Face juga gagal. "
+                f"Gemini: {gemini_error[:500]} | Hugging Face: {str(hf_exc)[:700]}"
+            ) from hf_exc
+
     raise RuntimeError(
-        "Gemini merespons tetapi tidak menyertakan gambar. Periksa akses model, kuota, dan respons API."
+        "Gemini gagal dan belum ada AI gambar cadangan yang dikonfigurasi. "
+        f"Penyebab Gemini: {gemini_error[:700]} "
+        "Untuk mengaktifkan fallback otomatis, tambahkan HF_TOKEN ke Streamlit Secrets."
     )
 
 # =========================================================
@@ -508,8 +533,8 @@ elif page == "💬 Chat AI":
 elif page == "🖼️ Foto AI":
     st.subheader("🖼️ Foto AI — Buat Gambar atau Edit Foto")
     st.write("Foto tidak wajib diunggah. Tanpa foto, AI membuat gambar baru dari teks. Jika foto diunggah, AI akan mengedit foto tersebut.")
-    if not get_secret("GEMINI_API_KEY"):
-        st.warning("Fitur ini memerlukan GEMINI_API_KEY di App settings → Secrets. Jangan masukkan API key ke kode atau GitHub.")
+    if not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN"):
+        st.warning("Pasang GEMINI_API_KEY (utama) atau HF_TOKEN (AI gambar cadangan) di App settings → Secrets. Jangan masukkan token ke kode atau GitHub.")
     uploaded_image = st.file_uploader("📤 Opsional: unggah foto untuk diedit", type=["png", "jpg", "jpeg", "webp"], key="upload_image")
     mode = "Edit foto yang diunggah" if uploaded_image else "Buat gambar baru dari teks"
     st.info("Mode aktif: " + mode)
@@ -522,8 +547,8 @@ elif page == "🖼️ Foto AI":
     if st.button("✨ Proses Foto AI", type="primary", use_container_width=True, key="run_image_edit"):
         if not image_instruction.strip():
             st.warning("Tuliskan ide atau perintah gambar terlebih dahulu.")
-        elif not get_secret("GEMINI_API_KEY"):
-            st.error("API key Gemini belum dipasang. Lihat petunjuk di bawah.")
+        elif not get_secret("GEMINI_API_KEY") and not get_secret("HF_TOKEN"):
+            st.error("Pasang GEMINI_API_KEY atau HF_TOKEN di Streamlit Secrets untuk memakai Foto AI.")
         else:
             try:
                 with st.spinner("AI sedang membuat gambar. Proses dapat memerlukan waktu dan kuota API..."):
@@ -535,7 +560,10 @@ elif page == "🖼️ Foto AI":
                     result_bytes = generate_or_edit_image(image_instruction.strip(), image_bytes, mime_type, aspect_ratio)
                 st.session_state.edited_image_bytes = result_bytes
                 st.session_state.edited_image_prompt = image_instruction.strip()
-                st.success("Gambar berhasil dibuat!" if not uploaded_image else "Foto berhasil diedit!")
+                provider_used = st.session_state.get("last_image_provider", "AI")
+                st.success(("Gambar berhasil dibuat!" if not uploaded_image else "Foto berhasil diedit!") + f" (via {provider_used})")
+                if provider_used.startswith("Hugging Face"):
+                    st.info("Gemini gagal, jadi aplikasi otomatis memakai AI cadangan Hugging Face.")
             except Exception as exc:
                 st.error("Foto belum berhasil diproses.")
                 error_text = str(exc)
@@ -553,9 +581,9 @@ elif page == "🖼️ Foto AI":
             if st.button("➕ Simpan hasil ke Galeri", use_container_width=True, key="save_edited_image"):
                 st.session_state.gallery.append({"kind": "image", "name": "studio_promkes_hasil.jpg", "data": st.session_state.edited_image_bytes, "created": datetime.now().strftime("%d-%m-%Y %H:%M")})
                 st.success("Hasil foto disimpan ke Galeri sesi.")
-    with st.expander("🔑 Cara memasang GEMINI_API_KEY"):
-        st.markdown("1. Buka [Google AI Studio](https://aistudio.google.com/) dan buat API key.\n2. Buka aplikasi di Streamlit Community Cloud.\n3. Buka **App settings → Secrets**.\n4. Tambahkan baris berikut dan ganti teks contoh dengan API key milikmu:\n```toml\nGEMINI_API_KEY = \"TEMPEL_API_KEY_DI_SINI\"\n```\n5. Simpan, lalu restart aplikasi bila diminta. Jangan kirim API key ke chat atau GitHub.")
-    st.caption("Model gambar API dapat memiliki biaya dan batas kuota; akses gratis tidak dijamin untuk semua model atau akun.")
+    with st.expander("🔑 Cara memasang API utama dan AI cadangan"):
+        st.markdown("**Gemini (utama):** buat API key di [Google AI Studio](https://aistudio.google.com/).\n\n**Hugging Face (cadangan otomatis):** buat akun di [Hugging Face](https://huggingface.co/), lalu buat token dengan izin Inference Providers di [Settings → Tokens](https://huggingface.co/settings/tokens). Kredit gratis terbatas dan bisa berubah; penggunaan lebih lanjut dapat berbayar.\n\nDi Streamlit Community Cloud buka **App settings → Secrets**, lalu tambahkan (ganti nilai contoh dengan token milikmu):\n```toml\nGEMINI_API_KEY = \"API_KEY_GEMINI\"\nHF_TOKEN = \"hf_TOKEN_HUGGINGFACE\"\n```\nSimpan dan tunggu aplikasi redeploy. Jangan masukkan token ke kode atau GitHub.")
+    st.caption("Foto AI mencoba Gemini dahulu. Jika gagal, aplikasi mencoba Hugging Face otomatis jika HF_TOKEN dan kuota/provider tersedia. Kredit gratis tidak dijamin cukup untuk setiap permintaan.")
 
 # =========================================================
 # VIDEO AI
