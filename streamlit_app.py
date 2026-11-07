@@ -192,6 +192,86 @@ def ask_gemini(history, prompt):
         raise RuntimeError("Gemini tidak mengembalikan jawaban.")
     return answer.strip()
 
+def ask_cloudflare(history, prompt):
+    token = get_secret("CLOUDFLARE_API_TOKEN")
+    account_id = get_secret("CLOUDFLARE_ACCOUNT_ID")
+
+    if not token or not account_id:
+        raise RuntimeError("Cloudflare API Token atau Account ID belum dipasang.")
+
+    model = get_secret(
+        "CLOUDFLARE_CHAT_MODEL",
+        "@cf/aisingapore/gemma-sea-lion-v4-27b-it"
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT + """
+            WAJIB: Selalu jawab dalam Bahasa Indonesia.
+            Gunakan bahasa Indonesia yang alami dan mudah dipahami.
+            Jangan menjawab dalam Bahasa Inggris kecuali diminta.
+            """
+        }
+    ]
+
+    for item in history[-12:]:
+        if item["role"] in ("user", "assistant"):
+            messages.append({
+                "role": item["role"],
+                "content": item["content"]
+            })
+
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/ai/run/{model}"
+    )
+
+    payload = {
+        "messages": messages,
+        "max_tokens": 1800,
+        "temperature": 0.5
+    }
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        if not data.get("success", False):
+            raise RuntimeError(str(data.get("errors", data)))
+
+        result = data.get("result") or {}
+        answer = result.get("response", "")
+
+        if not answer and result.get("choices"):
+            answer = result["choices"][0]["message"]["content"]
+
+        if not answer:
+            raise RuntimeError("Cloudflare tidak mengembalikan jawaban.")
+
+        return answer.strip()
+
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Cloudflare HTTP {exc.code}: {detail[:600]}"
+        ) from exc
+
 
 def ask_groq(history, prompt):
     api_key = get_secret("GROQ_API_KEY")
@@ -219,24 +299,31 @@ def ask_groq(history, prompt):
 
 def ask_ai(history, prompt):
     providers = []
+
     if get_secret("GEMINI_API_KEY"):
         providers.append(("Gemini", ask_gemini))
+
     if get_secret("GROQ_API_KEY"):
         providers.append(("Groq", ask_groq))
+
+    if (
+        get_secret("CLOUDFLARE_API_TOKEN")
+        and get_secret("CLOUDFLARE_ACCOUNT_ID")
+    ):
+        providers.append(("Cloudflare SEA-LION", ask_cloudflare))
+
     if not providers:
-        return None, None, ["API key belum dipasang di Streamlit Secrets."]
+        return None, None, ["Belum ada API AI yang dikonfigurasi."]
+
     errors = []
+
     for name, function in providers:
         try:
             return function(history, prompt), name, errors
         except Exception as exc:
-            error_text = str(exc).lower()
-            if any(word in error_text for word in ["quota", "429", "rate limit", "resource_exhausted", "too many requests"]):
-                errors.append(f"{name}: kuota atau batas permintaan tercapai.")
-            else:
-                errors.append(f"{name}: layanan gagal merespons. Periksa API key, model, dan log aplikasi.")
-    return None, None, errors
+            errors.append(f"{name}: {str(exc)[:500]}")
 
+    return None, None, errors
 
 def create_poster_copy(topic):
     """Buat salinan poster ringkas; gunakan AI lalu template lokal bila layanan teks gagal."""
